@@ -8,6 +8,8 @@ export interface Observation {
   observed_mass_estimate: number;
   visual_symmetry: number;
   contact_area_estimate: number;
+  texture_proxy: number;
+  interaction_feedback_history: number;
 }
 
 export interface HiddenPrediction {
@@ -31,6 +33,8 @@ export class PerceptionHead {
       rng.range(-0.1, 0.1),
       rng.range(-0.1, 0.1),
       rng.range(-0.1, 0.1),
+      rng.range(-0.1, 0.1),
+      rng.range(-0.1, 0.1),
     ]);
     this.bias = [0, 0, 0];
   }
@@ -45,11 +49,20 @@ export class PerceptionHead {
       observed_mass_estimate: clamp(obj.props.mass * 0.8 + obj.thickness * 0.2 + rng.normal(0, noiseScale)),
       visual_symmetry: clamp(1 - offsetMag / maxOffset - shapeAsymmetry + rng.normal(0, noiseScale * 0.7)),
       contact_area_estimate: clamp((obj.length * obj.thickness + Math.PI * obj.radius * obj.radius) / 3 + rng.normal(0, noiseScale)),
+      texture_proxy: clamp(obj.props.roughness * 0.7 + obj.props.friction_coeff * 0.3 + rng.normal(0, noiseScale * 0.5)),
+      interaction_feedback_history: clamp(this.experience / (this.experience + 12)),
     };
   }
 
   predict(obs: Observation): HiddenPrediction {
-    const x = [obs.observed_length, obs.observed_mass_estimate, obs.visual_symmetry, obs.contact_area_estimate];
+    const x = [
+      obs.observed_length,
+      obs.observed_mass_estimate,
+      obs.visual_symmetry,
+      obs.contact_area_estimate,
+      obs.texture_proxy,
+      obs.interaction_feedback_history,
+    ];
     const outputs = this.weights.map((row, i) => clamp(row.reduce((acc, w, idx) => acc + w * x[idx], this.bias[i])));
     return {
       hardness: outputs[0],
@@ -60,7 +73,14 @@ export class PerceptionHead {
   }
 
   train(obs: Observation, truth: PropertyVector, outcomeSignal: number, lr = 0.08): void {
-    const x = [obs.observed_length, obs.observed_mass_estimate, obs.visual_symmetry, obs.contact_area_estimate];
+    const x = [
+      obs.observed_length,
+      obs.observed_mass_estimate,
+      obs.visual_symmetry,
+      obs.contact_area_estimate,
+      obs.texture_proxy,
+      obs.interaction_feedback_history,
+    ];
     const y = [truth.hardness, truth.brittleness, truth.sharpness];
     const pred = this.predict(obs);
     const p = [pred.hardness, pred.brittleness, pred.sharpness];

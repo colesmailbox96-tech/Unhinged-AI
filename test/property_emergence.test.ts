@@ -7,6 +7,9 @@ import { PropertyVector } from '../src/sim/properties';
 import { WorldObject } from '../src/sim/object_model';
 import { PerceptionHead } from '../src/ai/perception';
 import { trainPolicy } from '../src/ai/rl';
+import { runEpisode } from '../src/ai/agent';
+import { WorldModel } from '../src/ai/world_model';
+import { ToolEmbedding } from '../src/ai/tool_embedding';
 
 function baseProps(overrides: Partial<PropertyVector> = {}): PropertyVector {
   return {
@@ -141,8 +144,43 @@ describe('perception learning', () => {
 });
 
 describe('emergent tool discovery', () => {
-  test('trained policy improves wood/minute over random baseline', () => {
+  test('curiosity policy improves discovery score over random baseline', () => {
     const summary = trainPolicy(1337, 80);
     expect(summary.improvementPct).toBeGreaterThan(10);
+  });
+});
+
+describe('phase 2 predictive scientist modules', () => {
+  test('predictive scientist episodes emit discovery metrics', () => {
+    const random = runEpisode(2026, 'RANDOM_STRIKE');
+    const predictive = runEpisode(2026, 'BIND_THEN_STRIKE');
+    expect(random.predictionErrorMean).toBe(0);
+    expect(predictive.predictionErrorMean).toBeGreaterThan(0);
+    expect(predictive.embeddingClusters).toBeGreaterThanOrEqual(1);
+  });
+
+  test('world model reduces prediction error with updates', () => {
+    const model = new WorldModel();
+    const sample = {
+      action_verb: 'STRIKE_WITH' as const,
+      objectA: { visual_features: 0.6, mass_estimate: 0.75, length_estimate: 0.9, texture_proxy: 0.5, interaction_feedback_history: 0.1 },
+      objectB: { visual_features: 0.4, mass_estimate: 0.5, length_estimate: 0.7, texture_proxy: 0.45, interaction_feedback_history: 0.1 },
+      geometry_features: 0.62,
+      relative_position: 0.3,
+    };
+    const truth = { expected_damage: 0.48, expected_tool_wear: 0.07, expected_fragments: 1.2, expected_property_changes: 0.18 };
+    const before = model.update(sample, truth);
+    let after = before;
+    for (let i = 0; i < 8; i++) after = model.update(sample, truth);
+    expect(after).toBeLessThan(before);
+  });
+
+  test('tool embeddings form effect clusters by similarity', () => {
+    const embedding = new ToolEmbedding();
+    embedding.update(1, { damage: 0.9, toolWear: 0.1, fragments: 1.2, propertyChanges: 0.2 });
+    embedding.update(2, { damage: 0.85, toolWear: 0.12, fragments: 1.1, propertyChanges: 0.22 });
+    embedding.update(3, { damage: 0.05, toolWear: 0.7, fragments: 0, propertyChanges: 0.05 });
+    expect(embedding.similarity(1, 2)).toBeGreaterThan(embedding.similarity(1, 3));
+    expect(embedding.clusterCount()).toBeGreaterThanOrEqual(2);
   });
 });

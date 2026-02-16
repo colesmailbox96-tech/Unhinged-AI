@@ -50,6 +50,19 @@ export class CanvasView {
       arc.alpha *= 0.92;
     }
 
+    if (this.world.predictedStrikeArc && this.world.predictedStrikeArc.alpha > 0.02) {
+      const arc = this.world.predictedStrikeArc;
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = `rgba(106, 235, 255, ${arc.alpha.toFixed(3)})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(arc.center.x * sx, arc.center.y * sy, arc.radius * sx, arc.start, arc.end);
+      ctx.stroke();
+      ctx.restore();
+      arc.alpha *= 0.92;
+    }
+
     for (const obj of this.world.objects.values()) {
       const x = obj.pos.x * sx;
       const y = obj.pos.y * sy;
@@ -111,6 +124,16 @@ export class CanvasView {
       }
     }
 
+    if (this.world.predictedStrikeDamage !== undefined && this.world.actualStrikeDamage !== undefined) {
+      ctx.fillStyle = '#d8fbff';
+      ctx.font = '12px monospace';
+      ctx.fillText(
+        `pred damage ${this.world.predictedStrikeDamage.toFixed(2)} | actual ${this.world.actualStrikeDamage.toFixed(2)}`,
+        10,
+        18,
+      );
+    }
+
     const selected = this.selectedId ? this.world.objects.get(this.selectedId) : undefined;
     if (selected) {
       const obs = this.perception.observe(selected, this.world.rng);
@@ -119,7 +142,7 @@ export class CanvasView {
       selectedEl.innerHTML = [
         `selected: ${selected.id}`,
         `true: ${trueVec}`,
-        `perceived: length=${obs.observed_length.toFixed(2)} mass≈${obs.observed_mass_estimate.toFixed(2)} symmetry=${obs.visual_symmetry.toFixed(2)} contact≈${obs.contact_area_estimate.toFixed(2)}`,
+        `perceived: length=${obs.observed_length.toFixed(2)} mass≈${obs.observed_mass_estimate.toFixed(2)} symmetry=${obs.visual_symmetry.toFixed(2)} contact≈${obs.contact_area_estimate.toFixed(2)} tex≈${obs.texture_proxy.toFixed(2)} feedback≈${obs.interaction_feedback_history.toFixed(2)}`,
         `pred hidden: hard=${pred.hardness.toFixed(2)} brit=${pred.brittleness.toFixed(2)} sharp=${pred.sharpness.toFixed(2)} ±${pred.uncertainty.toFixed(2)}`,
       ].join('<br/>');
     } else {

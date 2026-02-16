@@ -1,4 +1,4 @@
-import type { ObjID, WorldObject } from './object_model';
+import { deriveGripScore, estimateContactArea, type ObjID, type WorldObject } from './object_model';
 import {
   EPSILON,
   clamp,
@@ -26,7 +26,11 @@ export interface GrindResult {
 }
 
 function contactProxy(a: WorldObject, b: WorldObject): number {
-  return clamp((Math.min(a.radius, b.radius) + Math.min(a.length, b.length) * 0.15) / 1.2);
+  const area = Math.min(
+    estimateContactArea(a.shapeType, a.length, a.thickness, a.radius),
+    estimateContactArea(b.shapeType, b.length, b.thickness, b.radius),
+  );
+  return clamp((Math.sqrt(area) + Math.min(a.length, b.length) * 0.15) / 1.2);
 }
 
 export function bindObjects(a: WorldObject, b: WorldObject, id: ObjID, rng: RNG): BindResult {
@@ -41,7 +45,23 @@ export function bindObjects(a: WorldObject, b: WorldObject, id: ObjID, rng: RNG)
 
   const massWeight = clamp((a.props.mass + EPSILON) / (a.props.mass + b.props.mass + EPSILON));
   const props = mutate(combineVectors(a.props, b.props, { mass: massWeight, hardness: massWeight }), (1 - bindingQuality) * 0.01, rng);
-  props.mass = clamp(a.props.mass + b.props.mass * 0.65);
+  const totalMass = a.props.mass + b.props.mass + EPSILON;
+  const center_of_mass_offset = {
+    x:
+      (a.center_of_mass_offset.x * a.props.mass +
+        b.center_of_mass_offset.x * b.props.mass +
+        (b.props.mass - a.props.mass) * 0.18) /
+      totalMass,
+    y: (a.center_of_mass_offset.y * a.props.mass + b.center_of_mass_offset.y * b.props.mass) / totalMass,
+  };
+  const length = Math.max(a.length, b.length);
+  const gripPoint = { x: -length * 0.5, y: 0 };
+  const leverArm = Math.max(
+    0.2,
+    Math.hypot(center_of_mass_offset.x - gripPoint.x, center_of_mass_offset.y - gripPoint.y),
+  );
+  const impactMultiplier = clamp(leverArm / 1.2, 0.5, 2.2);
+  props.mass = clamp((a.props.mass + b.props.mass * 0.65) * impactMultiplier);
   props.hardness = clamp(Math.max(a.props.hardness, b.props.hardness) + bindingQuality * 0.08);
 
   const longBoost = Math.max(a.length, b.length) / (Math.min(a.length, b.length) + 0.2);
@@ -51,8 +71,12 @@ export function bindObjects(a: WorldObject, b: WorldObject, id: ObjID, rng: RNG)
     id,
     pos: { x: (a.pos.x + b.pos.x) / 2, y: (a.pos.y + b.pos.y) / 2 },
     vel: { x: 0, y: 0 },
+    shapeType: a.shapeType === 'rod' || b.shapeType === 'rod' ? 'rod' : a.shapeType,
     radius: Math.max(a.radius, b.radius),
-    length: Math.max(a.length, b.length),
+    length,
+    thickness: Math.max(a.thickness, b.thickness),
+    center_of_mass_offset,
+    grip_score: deriveGripScore('rod', length, Math.max(a.thickness, b.thickness), props.roughness),
     props,
     integrity: clamp(Math.min(a.integrity, b.integrity) * (0.6 + bindingQuality * 0.5)),
     constituents: [a.id, b.id],
@@ -67,8 +91,15 @@ function fragmentFrom(target: WorldObject, id: ObjID, rng: RNG): WorldObject {
     id,
     pos: { x: target.pos.x + rng.normal(0, 0.12), y: target.pos.y + rng.normal(0, 0.12) },
     vel: { x: rng.normal(0, 0.05), y: rng.normal(0, 0.05) },
+    shapeType: target.shapeType,
     radius: Math.max(0.05, target.radius * 0.52),
     length: Math.max(0.05, target.length * 0.5),
+    thickness: Math.max(0.05, target.thickness * 0.6),
+    center_of_mass_offset: {
+      x: target.center_of_mass_offset.x * 0.5 + rng.normal(0, 0.02),
+      y: target.center_of_mass_offset.y * 0.5 + rng.normal(0, 0.02),
+    },
+    grip_score: target.grip_score,
     props: mutate(target.props, 0.03, rng),
     integrity: clamp(target.integrity * 0.45),
     debugFamily: target.debugFamily,
@@ -76,9 +107,15 @@ function fragmentFrom(target: WorldObject, id: ObjID, rng: RNG): WorldObject {
 }
 
 export function strike(tool: WorldObject, target: WorldObject, rng: RNG, nextId: () => ObjID): StrikeResult {
-  const toolImpact = impactPotential(tool.props, tool.length);
-  const toolSharpness = clamp(cuttingPotential(tool.props) + tool.props.hardness * 0.2 - tool.props.brittleness * 0.22);
-  const damage = clamp((toolImpact * toolSharpness) / (target.props.hardness + 0.1));
+  const gripPoint = { x: -tool.length * 0.5, y: 0 };
+  const leverArm = Math.max(0.15, Math.hypot(tool.center_of_mass_offset.x - gripPoint.x, tool.center_of_mass_offset.y - gripPoint.y));
+  const impactForce = impactPotential(tool.props, tool.length) * leverArm;
+  const torque = impactForce * leverArm;
+  const inertia = Math.max(EPSILON, tool.props.mass * (tool.length * tool.length + tool.thickness * tool.thickness) / 12);
+  const angularVelocity = Math.max(0, Math.min(6, (tool.angularVelocity ?? 0) + torque / inertia));
+  tool.angularVelocity = angularVelocity;
+  const impactSurfaceSharpness = clamp(cuttingPotential(tool.props) + tool.props.sharpness * 0.2 + tool.grip_score * 0.1);
+  const damage = Math.max(0, angularVelocity * impactSurfaceSharpness * 0.35);
   const threshold = 0.22 + target.integrity * 0.42 + target.props.elasticity * 0.18;
   const fractured = damage > threshold;
 

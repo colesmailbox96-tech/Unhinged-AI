@@ -4,10 +4,10 @@ import { clamp } from '../sim/properties';
 import { RNG } from '../sim/rng';
 
 export interface Observation {
-  massish: number;
-  roughnessish: number;
-  lengthish: number;
-  temperatureish: number;
+  observed_length: number;
+  observed_mass_estimate: number;
+  visual_symmetry: number;
+  contact_area_estimate: number;
 }
 
 export interface HiddenPrediction {
@@ -26,22 +26,30 @@ export class PerceptionHead {
 
   constructor(seed = 123) {
     const rng = new RNG(seed);
-    this.weights = Array.from({ length: targets.length }, () => [rng.range(-0.1, 0.1), rng.range(-0.1, 0.1), rng.range(-0.1, 0.1), rng.range(-0.1, 0.1)]);
+    this.weights = Array.from({ length: targets.length }, () => [
+      rng.range(-0.1, 0.1),
+      rng.range(-0.1, 0.1),
+      rng.range(-0.1, 0.1),
+      rng.range(-0.1, 0.1),
+    ]);
     this.bias = [0, 0, 0];
   }
 
   observe(obj: WorldObject, rng: RNG): Observation {
     const noiseScale = Math.max(0.02, 0.15 / Math.sqrt(this.experience + 1));
+    const maxOffset = Math.max(0.1, obj.length * 0.5 + obj.thickness * 0.5);
+    const offsetMag = Math.hypot(obj.center_of_mass_offset.x, obj.center_of_mass_offset.y);
+    const shapeAsymmetry = obj.shapeType === 'shard' ? 0.25 : obj.shapeType === 'rod' ? 0.1 : 0.05;
     return {
-      massish: clamp(obj.props.mass + rng.normal(0, noiseScale)),
-      roughnessish: clamp(obj.props.roughness + rng.normal(0, noiseScale)),
-      lengthish: clamp(obj.length / 2.2 + rng.normal(0, noiseScale * 0.8)),
-      temperatureish: clamp(obj.props.thermal_conductivity * 0.5 + obj.props.heat_capacity * 0.5 + rng.normal(0, noiseScale)),
+      observed_length: clamp(obj.length / 2.2 + rng.normal(0, noiseScale * 0.8)),
+      observed_mass_estimate: clamp(obj.props.mass * 0.8 + obj.thickness * 0.2 + rng.normal(0, noiseScale)),
+      visual_symmetry: clamp(1 - offsetMag / maxOffset - shapeAsymmetry + rng.normal(0, noiseScale * 0.7)),
+      contact_area_estimate: clamp((obj.length * obj.thickness + Math.PI * obj.radius * obj.radius) / 3 + rng.normal(0, noiseScale)),
     };
   }
 
   predict(obs: Observation): HiddenPrediction {
-    const x = [obs.massish, obs.roughnessish, obs.lengthish, obs.temperatureish];
+    const x = [obs.observed_length, obs.observed_mass_estimate, obs.visual_symmetry, obs.contact_area_estimate];
     const outputs = this.weights.map((row, i) => clamp(row.reduce((acc, w, idx) => acc + w * x[idx], this.bias[i])));
     return {
       hardness: outputs[0],
@@ -52,7 +60,7 @@ export class PerceptionHead {
   }
 
   train(obs: Observation, truth: PropertyVector, outcomeSignal: number, lr = 0.08): void {
-    const x = [obs.massish, obs.roughnessish, obs.lengthish, obs.temperatureish];
+    const x = [obs.observed_length, obs.observed_mass_estimate, obs.visual_symmetry, obs.contact_area_estimate];
     const y = [truth.hardness, truth.brittleness, truth.sharpness];
     const pred = this.predict(obs);
     const p = [pred.hardness, pred.brittleness, pred.sharpness];

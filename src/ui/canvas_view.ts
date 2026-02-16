@@ -40,6 +40,16 @@ export class CanvasView {
     const sx = this.canvas.width / this.world.width;
     const sy = this.canvas.height / this.world.height;
 
+    if (this.world.lastStrikeArc && this.world.lastStrikeArc.alpha > 0.02) {
+      const arc = this.world.lastStrikeArc;
+      ctx.strokeStyle = `rgba(255, 234, 128, ${arc.alpha.toFixed(3)})`;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(arc.center.x * sx, arc.center.y * sy, arc.radius * sx, arc.start, arc.end);
+      ctx.stroke();
+      arc.alpha *= 0.92;
+    }
+
     for (const obj of this.world.objects.values()) {
       const x = obj.pos.x * sx;
       const y = obj.pos.y * sy;
@@ -48,15 +58,50 @@ export class CanvasView {
 
       ctx.strokeStyle = this.colorOf(obj);
       ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(x - line * 0.5, y);
-      ctx.lineTo(x + line * 0.5, y);
-      ctx.stroke();
+      if (obj.shapeType === 'rod') {
+        ctx.beginPath();
+        ctx.moveTo(x - line * 0.5, y);
+        ctx.lineTo(x + line * 0.5, y);
+        ctx.stroke();
+      } else if (obj.shapeType === 'shard') {
+        const h = Math.max(4, obj.thickness * sy * 0.8);
+        ctx.beginPath();
+        ctx.moveTo(x - line * 0.5, y + h);
+        ctx.lineTo(x + line * 0.5, y);
+        ctx.lineTo(x - line * 0.2, y - h);
+        ctx.closePath();
+        ctx.stroke();
+      } else if (obj.shapeType === 'plate') {
+        const w = Math.max(6, line);
+        const h = Math.max(4, obj.thickness * sy);
+        ctx.strokeRect(x - w * 0.5, y - h * 0.5, w, h);
+      }
 
       ctx.fillStyle = this.colorOf(obj);
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fill();
+      if (obj.shapeType === 'sphere') {
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (obj.shapeType === 'plate') {
+        const w = Math.max(6, line);
+        const h = Math.max(4, obj.thickness * sy);
+        ctx.fillRect(x - w * 0.5, y - h * 0.5, w, h);
+      } else {
+        ctx.beginPath();
+        ctx.arc(x + line * 0.5, y, Math.max(2, radius * 0.45), 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      if (obj.constituents) {
+        ctx.strokeStyle = '#ffe3a8';
+        ctx.beginPath();
+        ctx.moveTo(x - line * 0.4, y);
+        ctx.lineTo(x + line * 0.4, y);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(x + line * 0.42, y, Math.max(2, radius * 0.35), 0, Math.PI * 2);
+        ctx.stroke();
+      }
 
       if (this.selectedId === obj.id) {
         ctx.strokeStyle = '#fff';
@@ -74,7 +119,7 @@ export class CanvasView {
       selectedEl.innerHTML = [
         `selected: ${selected.id}`,
         `true: ${trueVec}`,
-        `perceived: mass=${obs.massish.toFixed(2)} rough=${obs.roughnessish.toFixed(2)} length=${obs.lengthish.toFixed(2)}`,
+        `perceived: length=${obs.observed_length.toFixed(2)} mass≈${obs.observed_mass_estimate.toFixed(2)} symmetry=${obs.visual_symmetry.toFixed(2)} contact≈${obs.contact_area_estimate.toFixed(2)}`,
         `pred hidden: hard=${pred.hardness.toFixed(2)} brit=${pred.brittleness.toFixed(2)} sharp=${pred.sharpness.toFixed(2)} ±${pred.uncertainty.toFixed(2)}`,
       ].join('<br/>');
     } else {

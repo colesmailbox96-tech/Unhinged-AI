@@ -28,9 +28,11 @@ export interface EpisodeResult {
 export interface PredictionSnapshot {
   action: WorldModelInput['action_verb'];
   predicted: Pick<WorldModelPrediction, 'expected_damage' | 'expected_tool_wear' | 'expected_fragments'>;
-  actual: { damage: number; toolWear: number; fragments: number };
-  error: { damage: number; toolWear: number; fragments: number };
+  actual: OutcomeMetrics;
+  error: OutcomeMetrics;
 }
+
+type OutcomeMetrics = { damage: number; toolWear: number; fragments: number };
 
 export interface EmbeddingSnapshot {
   toolId: number;

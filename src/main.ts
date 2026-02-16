@@ -60,9 +60,9 @@ function refresh(): void {
     `mode: ${realityCheckEnabled ? 'on' : 'off'}`,
     `freeze world model: ${freezeWorldModel ? 'on' : 'off'}`,
     `disable prediction model: ${disablePredictionModel ? 'on' : 'off'}`,
-    `prediction error trend: ${predictionErrorTrend.map((v) => v.toFixed(3)).slice(-6).join(' → ') || 'n/a'}`,
+    `prediction error trend: ${predictionErrorTrend.slice(-6).map((v) => v.toFixed(3)).join(' → ') || 'n/a'}`,
     `novel interactions trend: ${novelInteractionTrend.slice(-6).join(' → ') || 'n/a'}`,
-    `composite discovery trend: ${compositeRateTrend.map((v) => v.toFixed(2)).slice(-6).join(' → ') || 'n/a'}`,
+    `composite discovery trend: ${compositeRateTrend.slice(-6).map((v) => v.toFixed(2)).join(' → ') || 'n/a'}`,
     randomComparison
       ? `random(agent same seed): discovery ${randomComparison.random.toolDiscovery} vs ${randomComparison.agent.toolDiscovery} | composite ${randomComparison.random.compositeRate.toFixed(2)} vs ${randomComparison.agent.compositeRate.toFixed(2)} | pred acc ${randomComparison.random.predictionAccuracy.toFixed(2)} vs ${randomComparison.agent.predictionAccuracy.toFixed(2)}`
       : 'random-policy swap: not run',
@@ -121,14 +121,17 @@ function renderEmbedding(points: EmbeddingSnapshot[]): string {
   const maxY = Math.max(...ys);
   const width = 280;
   const height = 180;
-  const toX = (v: number): number => 10 + ((v - minX) / Math.max(1e-9, maxX - minX)) * (width - 20);
-  const toY = (v: number): number => 10 + ((v - minY) / Math.max(1e-9, maxY - minY)) * (height - 20);
+  const rangeX = Math.max(1e-9, maxX - minX);
+  const rangeY = Math.max(1e-9, maxY - minY);
+  const toX = (v: number): number => 10 + ((v - minX) / rangeX) * (width - 20);
+  const toY = (v: number): number => 10 + ((v - minY) / rangeY) * (height - 20);
   const circles = points
     .map((point) => {
       const x = toX(point.point.x);
       const y = toY(point.point.y);
       const color = `hsl(${Math.min(300, point.vector[0] * 210 + 80)}, 70%, ${Math.min(70, 30 + point.vector[1] * 25)}%)`;
-      return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="${color}"><title>tool ${point.toolId} | vector [${point.vector.map((v) => v.toFixed(3)).join(', ')}]</title></circle>`;
+      const vectorLabel = point.vector.map((v) => v.toFixed(3)).join(', ');
+      return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="${color}"><title>tool ${point.toolId} | vector [${vectorLabel}]</title></circle>`;
     })
     .join('');
   const links = points
@@ -144,7 +147,8 @@ function renderEmbedding(points: EmbeddingSnapshot[]): string {
       }),
     )
     .join('');
-  return `Embedding PCA-like view<br/><svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="background:#0d1420;border:1px solid #273248;border-radius:6px">${links}${circles}</svg>`;
+  const svg = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="background:#0d1420;border:1px solid #273248;border-radius:6px">${links}${circles}</svg>`;
+  return `Embedding PCA-like view<br/>${svg}`;
 }
 
 resetBtn.onclick = () => {

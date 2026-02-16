@@ -182,7 +182,9 @@ describe('phase 2 predictive scientist modules', () => {
     embedding.update(3, { damage: 0.05, toolWear: 0.7, fragments: 0, propertyChanges: 0.05 });
     expect(embedding.similarity(1, 2)).toBeGreaterThan(embedding.similarity(1, 3));
     expect(embedding.clusterCount()).toBeGreaterThanOrEqual(2);
-    expect(embedding.entries().length).toBe(3);
+    const entries = embedding.entries();
+    expect(entries).toHaveLength(3);
+    expect(entries.map((entry) => entry.toolId).sort((a, b) => a - b)).toEqual([1, 2, 3]);
   });
 
   test('world model freeze blocks learning updates', () => {

@@ -33,6 +33,10 @@ export interface MilestoneInput {
   controllerTarget?: number;
   controllerAchieved?: number;
   processChainAction?: string;
+  processChainLength?: number;
+  controllerSteps?: number;
+  stations?: number;
+  measurementUseful?: boolean;
 }
 
 const DEFAULT_REPEAT_COUNT = 3;
@@ -106,7 +110,9 @@ export class MilestoneTracker {
       typeof input.measurementSigma === 'number' &&
       typeof input.measurementSigmaBaseline === 'number' &&
       input.measurementSigmaBaseline > 0 &&
-      input.measurementSigma <= input.measurementSigmaBaseline * 0.5
+      input.measurementSigma <= input.measurementSigmaBaseline * 0.5 &&
+      input.measurementUseful &&
+      ((input.stations ?? 0) > 0 || (input.controllerSteps ?? 0) > 0 || (input.processChainLength ?? 0) >= 3)
     ) {
       const ciEvent = this.emit(
         'first-measurement-ci-halved',

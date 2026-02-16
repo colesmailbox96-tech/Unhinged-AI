@@ -299,7 +299,7 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
   const latestGeometry = result.measurements.find((entry) => entry.kind === 'geometry');
   livePanel.setStatus(
     [
-      `live t=${result.simTimeSeconds.toFixed(1)}s tick=${result.tick}`,
+      `live t=${result.simTimeSeconds.toFixed(1)}s tick=${result.tick} regime=${result.regime} (${result.timeInRegime.toFixed(1)}s)`,
       `wood/min 60s=${recent60.wood.toFixed(2)} 5m=${recent300.wood.toFixed(2)}`,
       `pred err 60s=${recent60.pred.toFixed(3)} 5m=${recent300.pred.toFixed(3)}`,
       `novel/min 60s=${recent60.novelty.toFixed(2)} 5m=${recent300.novelty.toFixed(2)}`,
@@ -307,6 +307,15 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
     ].join(' | '),
   );
   livePanel.setManufacturingDashboard([
+    `regime=${result.regime} timeInRegime=${result.timeInRegime.toFixed(1)}s`,
+    result.regimeChangeReason ? `regime change: ${result.regimeChangeReason}` : 'regime change: n/a',
+    `biomass avg=${result.biomassAvg.toFixed(3)} min=${result.biomassMin.toFixed(3)} avgTargetYield=${result.avgTargetYield.toFixed(3)}`,
+    `targets alive=${result.targetsAlive} spawned/min=${result.spawnedPerMin.toFixed(2)} destroyed/min=${result.destroyedPerMin.toFixed(2)}`,
+    `objects=${result.objectsTotal} fragments=${result.fragmentsTotal} despawned/min=${result.despawnedPerMin.toFixed(2)}`,
+    `energy avg=${result.avgEnergy.toFixed(3)} idle=${result.idleFraction.toFixed(3)} actions/min=${result.actionsPerMin.toFixed(2)}`,
+    `measurement useful rate=${result.measurementUsefulRate.toFixed(3)} total=${result.measurementTotal} spamPenalty=${result.measurementSpamPenalty.toFixed(3)}`,
+    `controller steps/min=${result.controllerStepsPerMin.toFixed(2)} lastTarget=${result.lastControllerTarget ?? 'n/a'} Δ=${(result.lastControllerOutcomeDelta ?? 0).toFixed(3)}`,
+    `embedding clusters=${result.embeddingClusters} windowN=${result.embeddingsInWindow}`,
     `station quality=${result.stationQuality.toFixed(3)} stations=${liveEngine.world.stations.size}`,
     latestMeasurement
       ? `mass CI=[${latestMeasurement.ciLow.toFixed(3)}, ${latestMeasurement.ciHigh.toFixed(3)}] σ=${latestMeasurement.sigma.toFixed(4)} n=${latestMeasurement.sampleCount}`

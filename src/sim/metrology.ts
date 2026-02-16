@@ -48,12 +48,12 @@ function updateStats(stats: RunningStats, sample: number): RunningStats {
   return { count, mean, m2: stats.m2 + delta * delta2 };
 }
 
-function summarize(kind: MeasurementKind, raw: number, objId: number, sigmaBase: number, instrumentId?: number): MeasurementResult {
+function summarize(kind: MeasurementKind, raw: number, objId: number, sigmaBase: number, instrumentId?: number, minSigma = 0): MeasurementResult {
   const key = keyFor(kind, objId, instrumentId);
   const next = updateStats(measurementStats.get(key) ?? { count: 0, mean: 0, m2: 0 }, raw);
   measurementStats.set(key, next);
   const sampleVariance = next.count > 1 ? next.m2 / (next.count - 1) : sigmaBase ** 2;
-  const standardError = Math.sqrt(sampleVariance / Math.max(1, next.count));
+  const standardError = Math.max(minSigma, Math.sqrt(sampleVariance / Math.max(1, next.count)));
   const ci = 1.96 * standardError;
   return {
     kind,
@@ -76,10 +76,11 @@ function measuredScalar(
   station?: AnchoredStation,
 ): MeasurementResult {
   const quality = instrumentQuality(instrument, station);
+  const minSigma = Math.max(0.01, 0.05 - (station?.quality ?? 0) * 0.035);
   const noiseScale = clamp(1.08 - quality * 0.72, 0.25, 1.1) * (station?.bonuses.processNoiseScale ?? 1);
   const bias = (1 - quality) * 0.18 * sigmaBase;
   const noisy = truth + bias + rng.normal(0, sigmaBase * noiseScale);
-  const result = summarize(kind, noisy, obj.id, sigmaBase, instrument?.id);
+  const result = summarize(kind, noisy, obj.id, sigmaBase, instrument?.id, minSigma);
   return result;
 }
 
@@ -94,12 +95,13 @@ export function measureGeometry(
   station?: AnchoredStation,
 ): MeasurementResult {
   const quality = instrumentQuality(instrument, station);
+  const minSigma = Math.max(0.01, 0.05 - (station?.quality ?? 0) * 0.035);
   const noiseScale = clamp(1.05 - quality * 0.7, 0.3, 1.05) * (station?.bonuses.processNoiseScale ?? 1);
   const bias = (1 - quality) * 0.02;
   const length = clamp(obj.length / 2.5 + bias + rng.normal(0, 0.05 * noiseScale));
   const thickness = clamp(obj.thickness / 1.2 + bias + rng.normal(0, 0.04 * noiseScale));
   const flatness = clamp(obj.latentPrecision.surface_planarity + bias + rng.normal(0, 0.05 * noiseScale));
-  const flatnessSummary = summarize('geometry', flatness, obj.id, 0.05, instrument?.id);
+  const flatnessSummary = summarize('geometry', flatness, obj.id, 0.05, instrument?.id, minSigma);
   return {
     ...flatnessSummary,
     value: { length, thickness, flatness: Number(flatnessSummary.value) },

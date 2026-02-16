@@ -77,4 +77,15 @@ export class ToolEmbedding {
       interactionBins: [...this.interactionBins.values()],
     };
   }
+
+  loadSnapshot(snap: ReturnType<ToolEmbedding['snapshot']>): void {
+    this.vectors.clear();
+    for (const entry of snap.vectors) {
+      this.vectors.set(entry.toolId, [...entry.vector]);
+    }
+    this.interactionBins.clear();
+    for (const bin of snap.interactionBins) {
+      this.interactionBins.add(bin);
+    }
+  }
 }

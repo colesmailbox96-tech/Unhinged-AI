@@ -1,7 +1,9 @@
 import type { TrainingSummary } from '../ai/rl';
+import type { TrainingState } from '../sim/trainingScheduler';
 
 export class MetricsStore {
   training: TrainingSummary | null = null;
+  trainingState: TrainingState = 'off';
   lastEpisode = 0;
   woodPerMinute = 0;
   hardnessMae = 0;
@@ -18,7 +20,7 @@ export class MetricsStore {
   toHtml(): string {
     const training = this.training
       ? `baseline=${this.training.baselineMean.toFixed(2)} | trained=${this.training.trainedMean.toFixed(2)} | improve=${this.training.improvementPct.toFixed(1)}%`
-      : 'training: not run';
+      : `training: ${this.trainingState}`;
 
     return [
       `episode: ${this.lastEpisode}`,

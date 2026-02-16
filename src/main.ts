@@ -6,6 +6,7 @@ import { runEpisode as runRunnerEpisode, runSweep, trainEpisodes, type EpisodeMe
 import { CanvasView } from './ui/canvas_view';
 import { AutopilotPanel, type AutopilotConfig, type ExportFormat } from './ui/autopilot_panel';
 import { LiveModePanel, type LiveModePanelConfig } from './ui/live_mode_panel';
+import { EvolutionPanel, type EvolutionPanelConfig, type EvolutionDashboardData, type ProveLearningReport } from './ui/evolution_panel';
 import { World } from './sim/world';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#worldCanvas')!;
@@ -73,6 +74,10 @@ let showTrueLatentState = false;
 let showWorksetOverlay = true;
 const liveTimeline: import('./sim/milestones').MilestoneEvent[] = [];
 const liveMetricHistory: LiveTickResult[] = [];
+let evolutionRunning = false;
+let evolutionTimer: number | undefined;
+let evolutionTrainTimer: number | undefined;
+const evolutionMilestonesSeen = new Set<string>();
 
 function refresh(): void {
   metricsEl.innerHTML = metrics.toHtml();
@@ -250,6 +255,7 @@ function applyLiveMetrics(result: LiveTickResult): void {
   metrics.noveltyInteractions = Number(result.novelInteractionsPerMinute.toFixed(2));
   metrics.compositeRate = result.compositeDiscoveryRate;
   metrics.embeddingClusters = result.embeddingClusters;
+  metrics.trainingState = result.trainingMetrics.state;
 }
 
 function exportLiveSnapshot(): void {
@@ -284,6 +290,8 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
   world = liveEngine.world;
   view = new CanvasView(canvas, world, perception);
   view.showWorkset = showWorksetOverlay;
+  view.agentIntent = result.agentIntent;
+  view.agentTargetId = liveEngine.world.getTargetId();
   const windowAverages = (seconds: number): { wood: number; pred: number; novelty: number; composite: number; clusters: number } => {
     const windowRows = liveMetricHistory.filter((entry) => result.simTimeSeconds - entry.simTimeSeconds <= seconds);
     const avg = (pick: (entry: LiveTickResult) => number): number =>
@@ -439,6 +447,236 @@ const livePanel = new LiveModePanel(panelEl, {
   onToggleShowWorkset: (value) => {
     showWorksetOverlay = value;
   },
+});
+
+function clearEvolutionTimers(): void {
+  if (evolutionTimer !== undefined) window.clearInterval(evolutionTimer);
+  if (evolutionTrainTimer !== undefined) window.clearInterval(evolutionTrainTimer);
+  evolutionTimer = undefined;
+  evolutionTrainTimer = undefined;
+}
+
+function startEvolution(config: EvolutionPanelConfig): void {
+  clearLiveTimers();
+  clearEvolutionTimers();
+  evolutionRunning = true;
+  evolutionMilestonesSeen.clear();
+  livePaused = false;
+  liveFastForward = false;
+  liveTimeline.length = 0;
+  liveMetricHistory.length = 0;
+  const evoDefaults: LiveModePanelConfig = {
+    seed: 1337,
+    durationMinutes: 60,
+    runIndefinitely: true,
+    populationSize: 4,
+    ticksPerSecond: 30,
+    trainEveryMs: 80,
+    batchSize: 32,
+    maxTrainMsPerSecond: 50,
+    deterministic: false,
+    renderEveryNTicks: 8,
+    rollingSeconds: 60,
+    showTrueLatentState: false,
+  };
+  liveConfig = evoDefaults;
+  liveEngine = new LiveModeEngine({
+    seed: evoDefaults.seed,
+    populationSize: evoDefaults.populationSize,
+    ticksPerSecond: evoDefaults.ticksPerSecond,
+    deterministic: evoDefaults.deterministic,
+    rollingSeconds: evoDefaults.rollingSeconds,
+  });
+  world = liveEngine.world;
+  view = new CanvasView(canvas, world, perception);
+  view.showWorkset = showWorksetOverlay;
+
+  const trainConfig: LiveTrainingConfig = {
+    trainEveryMs: evoDefaults.trainEveryMs,
+    batchSize: evoDefaults.batchSize,
+    maxTrainMsPerSecond: evoDefaults.maxTrainMsPerSecond,
+    stepsPerTick: 3,
+  };
+
+  let lastDashboardUpdate = 0;
+  const simBatch = (): void => {
+    if (!liveEngine || !liveConfig) return;
+    const ticksToRun = Math.max(1, Math.round(liveConfig.ticksPerSecond / 30));
+    for (let i = 0; i < ticksToRun; i++) {
+      const tickResult = liveEngine.tickOnce();
+      if (tickResult.milestones.length) {
+        liveTimeline.push(...tickResult.milestones);
+        for (const m of tickResult.milestones) {
+          const key = `${m.kind}-${m.id}`;
+          if (!evolutionMilestonesSeen.has(key)) {
+            evolutionMilestonesSeen.add(key);
+            evolutionPanel.addMilestone({ time: m.timestamp, label: m.kind });
+          }
+        }
+      }
+      liveMetricHistory.push(tickResult);
+      while (liveMetricHistory.length > 0 && tickResult.simTimeSeconds - liveMetricHistory[0].simTimeSeconds > 300) liveMetricHistory.shift();
+      applyLiveMetrics(tickResult);
+      // Update dashboard at ~1Hz
+      if (tickResult.simTimeSeconds - lastDashboardUpdate >= 1) {
+        lastDashboardUpdate = tickResult.simTimeSeconds;
+        const dashData: EvolutionDashboardData = {
+          rewardPerMin: tickResult.woodPerMinute,
+          novelPerMin: tickResult.novelInteractionsPerMinute,
+          toolClusters: tickResult.embeddingClusters,
+          predictionError: tickResult.predictionErrorMean,
+          trainingStepsPerMin: tickResult.trainingMetrics.trainingStepsLast60s,
+          lossEMA: tickResult.trainingMetrics.batchLoss,
+          policyEntropy: tickResult.trainingMetrics.policyEntropy,
+          stallScore: tickResult.stallMetrics.isStalled ? 1 : 0,
+          stallEventsPerMin: tickResult.stallMetrics.stallEventsPerMin,
+          timeInStallPct: tickResult.stallMetrics.timeInStallPct,
+          spawnThrottle: tickResult.populationMetrics.spawnThrottle,
+          debrisCleanupRate: tickResult.populationMetrics.debrisCleanupRate,
+          trainingState: tickResult.trainingMetrics.state,
+          trainingStepsTotal: tickResult.trainingMetrics.trainingStepsTotal,
+          replaySize: tickResult.trainingMetrics.replaySize,
+        };
+        evolutionPanel.updateDashboard(dashData, tickResult.simTimeSeconds);
+        evolutionPanel.setStatus(
+          `evolving t=${tickResult.simTimeSeconds.toFixed(0)}s ` +
+          `steps=${tickResult.trainingMetrics.trainingStepsTotal} ` +
+          `loss=${tickResult.trainingMetrics.batchLoss.toFixed(4)} ` +
+          `intent=${tickResult.agentIntent}`
+        );
+      }
+      // Render periodically
+      if (tickResult.tick % liveConfig.renderEveryNTicks === 0) {
+        world = liveEngine.world;
+        view = new CanvasView(canvas, world, perception);
+        view.showWorkset = showWorksetOverlay;
+        refresh();
+      }
+    }
+  };
+
+  evolutionTimer = window.setInterval(simBatch, Math.max(1, Math.round(1000 / 30)));
+  evolutionTrainTimer = window.setInterval(() => {
+    if (!liveEngine) return;
+    liveEngine.trainChunk(trainConfig);
+  }, trainConfig.trainEveryMs);
+
+  evolutionPanel.setStatus('evolution started');
+  // Handle rollout strategy: auto-reset every 5 minutes
+  if (config.strategy === 'rollout') {
+    const rolloutInterval = window.setInterval(() => {
+      if (!liveEngine || !evolutionRunning) {
+        window.clearInterval(rolloutInterval);
+        return;
+      }
+      if (liveEngine.simTimeSeconds > 300) {
+        // Save weights, reset world
+        const savedWorldModel = liveEngine.worldModel;
+        const savedEmbedding = liveEngine.embedding;
+        // Restore learned weights via snapshot/loadSnapshot
+        const wmSnap = savedWorldModel.snapshot();
+        const embSnap = savedEmbedding.snapshot();
+        liveEngine = new LiveModeEngine({
+          seed: liveEngine.seed + 1,
+          populationSize: 4,
+          ticksPerSecond: 30,
+          deterministic: false,
+          rollingSeconds: 60,
+        });
+        liveEngine.worldModel.loadSnapshot(wmSnap);
+        liveEngine.embedding.loadSnapshot(embSnap);
+        world = liveEngine.world;
+        view = new CanvasView(canvas, world, perception);
+        evolutionPanel.addMilestone({ time: 0, label: 'rollout reset — new episode' });
+      }
+    }, 5000);
+  }
+}
+
+function stopEvolution(): void {
+  clearEvolutionTimers();
+  evolutionRunning = false;
+  evolutionPanel.setStatus('evolution stopped');
+  evolutionPanel.enableStartButton();
+}
+
+function proveLearning(): void {
+  evolutionPanel.setStatus('proving learning… running before snapshot');
+  // Run a short evaluation with current weights
+  const beforeEngine = new LiveModeEngine({
+    seed: 9999,
+    populationSize: 2,
+    ticksPerSecond: 20,
+    deterministic: true,
+    rollingSeconds: 30,
+  });
+  const trainConfig: LiveTrainingConfig = {
+    trainEveryMs: 50,
+    batchSize: 16,
+    maxTrainMsPerSecond: 50,
+    stepsPerTick: 3,
+  };
+  // 2 minutes at 20 tps = 2400 ticks
+  let lastBefore = beforeEngine.tickOnce();
+  for (let i = 0; i < 2400; i++) {
+    lastBefore = beforeEngine.tickOnce();
+    if (i % 5 === 0) beforeEngine.trainChunk(trainConfig);
+  }
+  const beforeReward = lastBefore.woodPerMinute;
+  const beforeNovel = lastBefore.novelInteractionsPerMinute;
+  const beforeClusters = lastBefore.embeddingClusters;
+  const beforeStall = lastBefore.stallMetrics.timeInStallPct;
+
+  // Train for 5 minutes = 6000 ticks
+  evolutionPanel.setStatus('proving learning… training');
+  for (let i = 0; i < 6000; i++) {
+    beforeEngine.tickOnce();
+    if (i % 3 === 0) beforeEngine.trainChunk(trainConfig);
+  }
+
+  // Run 2-minute evaluation after training
+  evolutionPanel.setStatus('proving learning… running after snapshot');
+  const afterEngine = new LiveModeEngine({
+    seed: 9999,
+    populationSize: 2,
+    ticksPerSecond: 20,
+    deterministic: true,
+    rollingSeconds: 30,
+  });
+  // Restore trained model via snapshot/loadSnapshot
+  afterEngine.worldModel.loadSnapshot(beforeEngine.worldModel.snapshot());
+  afterEngine.embedding.loadSnapshot(beforeEngine.embedding.snapshot());
+  let lastAfter = afterEngine.tickOnce();
+  for (let i = 0; i < 2400; i++) {
+    lastAfter = afterEngine.tickOnce();
+  }
+  const afterReward = lastAfter.woodPerMinute;
+  const afterNovel = lastAfter.novelInteractionsPerMinute;
+  const afterClusters = lastAfter.embeddingClusters;
+  const afterStall = lastAfter.stallMetrics.timeInStallPct;
+
+  const improved = afterReward > beforeReward || afterNovel > beforeNovel || afterClusters > beforeClusters;
+  const report: ProveLearningReport = {
+    beforeAvgRewardPerMin: beforeReward,
+    afterAvgRewardPerMin: afterReward,
+    beforeNovelPerMin: beforeNovel,
+    afterNovelPerMin: afterNovel,
+    beforeClusters,
+    afterClusters,
+    beforeStallPct: beforeStall,
+    afterStallPct: afterStall,
+    improved,
+  };
+  evolutionPanel.setReport(report);
+  // Export as JSON
+  downloadText('prove-learning.json', JSON.stringify(report, null, 2), 'application/json');
+  evolutionPanel.setStatus(improved ? 'learning proved ✓' : 'no improvement detected');
+}
+
+const evolutionPanel = new EvolutionPanel(panelEl, {
+  onStartEvolution: startEvolution,
+  onStopEvolution: stopEvolution,
+  onProveLearning: proveLearning,
 });
 
 const autopilotPanel = new AutopilotPanel(panelEl, {

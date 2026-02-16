@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { runEpisode, runSweep, trainEpisodes } from '../src/runner/runner';
+import { LiveModeEngine } from '../src/runner/live_mode';
 
 describe('runner shared API', () => {
   test('runEpisode supports interventions and deterministic replay checks', () => {
@@ -32,5 +33,28 @@ describe('runner shared API', () => {
   test('trainEpisodes proxies policy training summary', () => {
     const summary = trainEpisodes(1337, 10);
     expect(summary.learningCurve).toHaveLength(10);
+  });
+
+  test('live mode loop runs for many ticks and logs milestones', () => {
+    const engine = new LiveModeEngine({
+      seed: 1337,
+      populationSize: 3,
+      ticksPerSecond: 20,
+      deterministic: true,
+      rollingSeconds: 30,
+    });
+    for (let i = 0; i < 600; i++) {
+      engine.tickOnce();
+      if (i % 8 === 0) {
+        engine.trainChunk({
+          trainEveryMs: 50,
+          batchSize: 6,
+          maxTrainMsPerSecond: 50,
+          stepsPerTick: 2,
+        });
+      }
+    }
+    expect(engine.tick).toBe(600);
+    expect(engine.milestones.all().length).toBeGreaterThan(0);
   });
 });

@@ -67,4 +67,14 @@ export class ToolEmbedding {
   entries(): Array<{ toolId: number; vector: [number, number, number, number] }> {
     return [...this.vectors.entries()].map(([toolId, vector]) => ({ toolId, vector: [...vector] as [number, number, number, number] }));
   }
+
+  snapshot(): {
+    vectors: Array<{ toolId: number; vector: [number, number, number, number] }>;
+    interactionBins: string[];
+  } {
+    return {
+      vectors: this.entries(),
+      interactionBins: [...this.interactionBins.values()],
+    };
+  }
 }

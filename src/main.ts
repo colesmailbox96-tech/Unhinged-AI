@@ -1,9 +1,11 @@
 import { type EmbeddingSnapshot, type Strategy } from './ai/agent';
 import { PerceptionHead } from './ai/perception';
 import { MetricsStore } from './debug/metrics';
+import { LiveModeEngine, type LiveTrainingConfig, type LiveTickResult } from './runner/live_mode';
 import { runEpisode as runRunnerEpisode, runSweep, trainEpisodes, type EpisodeMetrics, type RunnerInterventions } from './runner/runner';
 import { CanvasView } from './ui/canvas_view';
 import { AutopilotPanel, type AutopilotConfig, type ExportFormat } from './ui/autopilot_panel';
+import { LiveModePanel, type LiveModePanelConfig } from './ui/live_mode_panel';
 import { World } from './sim/world';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#worldCanvas')!;
@@ -60,6 +62,15 @@ let autopilotRunning = false;
 let autopilotPaused = false;
 let autopilotCancelRequested = false;
 let autopilotStartedAt = 0;
+let liveEngine: LiveModeEngine | null = null;
+let liveConfig: LiveModePanelConfig | null = null;
+let liveSimulationTimer: number | undefined;
+let liveTrainingTimer: number | undefined;
+let livePaused = false;
+let liveFastForward = false;
+let liveLastRenderedTick = 0;
+const liveTimeline: import('./sim/milestones').MilestoneEvent[] = [];
+const liveMetricHistory: LiveTickResult[] = [];
 
 function refresh(): void {
   metricsEl.innerHTML = metrics.toHtml();
@@ -220,6 +231,170 @@ function exportHistory(format: ExportFormat): void {
   }
   downloadText('metrics.csv', toCsv(autopilotHistory), 'text/csv');
 }
+
+function clearLiveTimers(): void {
+  if (liveSimulationTimer !== undefined) window.clearInterval(liveSimulationTimer);
+  if (liveTrainingTimer !== undefined) window.clearInterval(liveTrainingTimer);
+  liveSimulationTimer = undefined;
+  liveTrainingTimer = undefined;
+}
+
+function applyLiveMetrics(result: LiveTickResult): void {
+  metrics.lastEpisode = result.tick;
+  metrics.woodPerMinute = result.woodPerMinute;
+  metrics.predictionError = result.predictionErrorMean;
+  metrics.noveltyInteractions = Number(result.novelInteractionsPerMinute.toFixed(2));
+  metrics.compositeRate = result.compositeDiscoveryRate;
+  metrics.embeddingClusters = result.embeddingClusters;
+}
+
+function exportLiveSnapshot(): void {
+  if (!liveEngine) return;
+  downloadText('live-snapshot.json', JSON.stringify(liveEngine.createSnapshot(), null, 2), 'application/json');
+}
+
+function exportMilestones(): void {
+  if (!liveTimeline.length) return;
+  downloadText('milestones.json', JSON.stringify(liveTimeline, null, 2), 'application/json');
+}
+
+function replayBookmark(bookmarkId: string): void {
+  if (!liveEngine) return;
+  const frames = liveEngine.replayBookmark(bookmarkId);
+  if (!frames.length) return;
+  world.logs.unshift(`Replay ${bookmarkId} (${frames.length} frames, deterministic playback)`);
+  for (const frame of frames.slice(-6).reverse()) {
+    world.logs.unshift(`t=${frame.simTimeSeconds.toFixed(2)} action=${frame.action} sig=${frame.replaySignature}`);
+  }
+  refresh();
+}
+
+function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void {
+  if (!liveEngine || !liveConfig) return;
+  liveMetricHistory.push(result);
+  while (liveMetricHistory.length && result.simTimeSeconds - liveMetricHistory[0].simTimeSeconds > 300) liveMetricHistory.shift();
+  applyLiveMetrics(result);
+  const shouldRender = liveFastForward ? result.tick - liveLastRenderedTick >= liveConfig.renderEveryNTicks : true;
+  if (!shouldRender) return;
+  liveLastRenderedTick = result.tick;
+  world = liveEngine.world;
+  view = new CanvasView(canvas, world, perception);
+  const windowAverages = (seconds: number): { wood: number; pred: number; novelty: number; composite: number; clusters: number } => {
+    const windowRows = liveMetricHistory.filter((entry) => result.simTimeSeconds - entry.simTimeSeconds <= seconds);
+    const avg = (pick: (entry: LiveTickResult) => number): number =>
+      windowRows.reduce((sum, entry) => sum + pick(entry), 0) / Math.max(1, windowRows.length);
+    return {
+      wood: avg((entry) => entry.woodPerMinute),
+      pred: avg((entry) => entry.predictionErrorMean),
+      novelty: avg((entry) => entry.novelInteractionsPerMinute),
+      composite: avg((entry) => entry.compositeDiscoveryRate),
+      clusters: avg((entry) => entry.embeddingClusters),
+    };
+  };
+  const recent60 = windowAverages(60);
+  const recent300 = windowAverages(300);
+  livePanel.setStatus(
+    [
+      `live t=${result.simTimeSeconds.toFixed(1)}s tick=${result.tick}`,
+      `wood/min 60s=${recent60.wood.toFixed(2)} 5m=${recent300.wood.toFixed(2)}`,
+      `pred err 60s=${recent60.pred.toFixed(3)} 5m=${recent300.pred.toFixed(3)}`,
+      `novel/min 60s=${recent60.novelty.toFixed(2)} 5m=${recent300.novelty.toFixed(2)}`,
+      `composite 60s=${recent60.composite.toFixed(3)} 5m=${recent300.composite.toFixed(3)} clusters 60s=${recent60.clusters.toFixed(2)}`,
+    ].join(' | '),
+  );
+  livePanel.setTimeline(liveTimeline);
+  refresh();
+}
+
+function startLiveMode(config: LiveModePanelConfig, livePanel: LiveModePanel): void {
+  clearLiveTimers();
+  liveConfig = config;
+  livePaused = false;
+  liveFastForward = false;
+  liveTimeline.length = 0;
+  liveMetricHistory.length = 0;
+  liveEngine = new LiveModeEngine({
+    seed: config.seed,
+    populationSize: config.populationSize,
+    ticksPerSecond: config.ticksPerSecond,
+    deterministic: config.deterministic,
+    rollingSeconds: config.rollingSeconds,
+  });
+  world = liveEngine.world;
+  view = new CanvasView(canvas, world, perception);
+  const startAt = performance.now();
+  const maxRuntimeMs = config.runIndefinitely ? Number.POSITIVE_INFINITY : config.durationMinutes * 60_000;
+  const simulationBatch = (): void => {
+    if (!liveEngine || !liveConfig) return;
+    if (livePaused) return;
+    const ticksToRun = liveFastForward ? Math.max(10, liveConfig.renderEveryNTicks * 2) : 1;
+    for (let i = 0; i < ticksToRun; i++) {
+      const tickResult = liveEngine.tickOnce();
+      if (tickResult.milestones.length) {
+        liveTimeline.push(...tickResult.milestones);
+        livePanel.setTimeline(liveTimeline);
+      }
+      maybeRenderLive(tickResult, livePanel);
+    }
+    if (performance.now() - startAt >= maxRuntimeMs) {
+      clearLiveTimers();
+      livePanel.setStatus('live completed');
+    }
+  };
+  liveSimulationTimer = window.setInterval(simulationBatch, Math.max(1, Math.round(1000 / Math.max(1, config.ticksPerSecond))));
+  const trainConfig: LiveTrainingConfig = {
+    trainEveryMs: config.trainEveryMs,
+    batchSize: config.batchSize,
+    maxTrainMsPerSecond: config.maxTrainMsPerSecond,
+    stepsPerTick: 3,
+  };
+  liveTrainingTimer = window.setInterval(() => {
+    if (!liveEngine || livePaused) return;
+    liveEngine.trainChunk(trainConfig);
+  }, trainConfig.trainEveryMs);
+  livePanel.setStatus('live running');
+  refresh();
+}
+
+const livePanel = new LiveModePanel(panelEl, {
+  onStart: (config) => startLiveMode(config, livePanel),
+  onPause: () => {
+    livePaused = true;
+    livePanel.setStatus('live paused');
+  },
+  onResume: () => {
+    livePaused = false;
+    livePanel.setStatus('live running');
+  },
+  onFastForwardToggle: () => {
+    liveFastForward = !liveFastForward;
+    livePanel.setStatus(liveFastForward ? 'live fast-forward' : 'live running');
+  },
+  onReset: (nextSeed) => {
+    if (!liveConfig) return;
+    startLiveMode({ ...liveConfig, seed: nextSeed }, livePanel);
+  },
+  onExportSnapshot: exportLiveSnapshot,
+  onExportMilestones: exportMilestones,
+  onBookmark: () => {
+    if (!liveEngine) return;
+    const bookmark = liveEngine.bookmark();
+    livePanel.setBookmarks(liveEngine.bookmarks.map((entry) => entry.id));
+    livePanel.setStatus(`bookmarked ${bookmark.id}`);
+  },
+  onReplayBookmark: replayBookmark,
+  onTimelineJump: (milestoneId) => {
+    const milestone = liveTimeline.find((entry) => entry.id === milestoneId);
+    if (!milestone || !liveEngine) return;
+    const focusId = milestone.objectIds[0];
+    if (focusId && liveEngine.focusOnObject(focusId)) {
+      world.logs.unshift(`Timeline jump: milestone ${milestone.kind}, focusing object ${focusId}`);
+    } else {
+      world.logs.unshift(`Timeline jump: milestone ${milestone.kind}`);
+    }
+    refresh();
+  },
+});
 
 const autopilotPanel = new AutopilotPanel(panelEl, {
   onStart: (config) => {

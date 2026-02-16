@@ -125,4 +125,18 @@ export class WorldModel {
   meanPredictionError(): number {
     return this.runningPredictionError;
   }
+
+  snapshot(): {
+    weights: number[][];
+    bias: number[];
+    meanPredictionError: number;
+    seen: Array<[string, number]>;
+  } {
+    return {
+      weights: this.weights.map((row) => [...row]),
+      bias: [...this.bias],
+      meanPredictionError: this.runningPredictionError,
+      seen: [...this.seen.entries()],
+    };
+  }
 }

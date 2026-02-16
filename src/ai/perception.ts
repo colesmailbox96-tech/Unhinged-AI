@@ -105,4 +105,16 @@ export class PerceptionHead {
     });
     return errors.reduce((a, b) => a + b, 0) / Math.max(1, errors.length);
   }
+
+  snapshot(): {
+    weights: number[][];
+    bias: number[];
+    experience: number;
+  } {
+    return {
+      weights: this.weights.map((row) => [...row]),
+      bias: [...this.bias],
+      experience: this.experience,
+    };
+  }
 }

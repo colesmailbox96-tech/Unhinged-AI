@@ -16,6 +16,9 @@ import {
   worksetAtStationFraction,
   type WorksetState,
 } from '../sim/workset';
+import { TrainingScheduler, type TrainingMetrics } from '../sim/trainingScheduler';
+import { StallDetector, type StallMetrics } from '../sim/stallDetector';
+import { PopulationController, type PopulationMetrics } from '../sim/populationController';
 
 type LiveVerb = 'MOVE_TO' | 'PICK_UP' | 'DROP' | 'BIND_TO' | 'STRIKE_WITH' | 'GRIND' | 'HEAT' | 'SOAK' | 'COOL' | 'ANCHOR' | 'CONTROL' | 'REST';
 export type LiveRegime = 'explore' | 'exploit' | 'manufacture';
@@ -122,6 +125,10 @@ export interface LiveTickResult {
   dutyMode: 'lab' | 'world';
   manufacturingImprovements: number;
   milestones: MilestoneEvent[];
+  trainingMetrics: TrainingMetrics;
+  stallMetrics: StallMetrics;
+  populationMetrics: PopulationMetrics;
+  agentIntent: string;
 }
 
 export interface SegmentFrame {
@@ -327,6 +334,9 @@ export class LiveModeEngine {
   readonly embedding: ToolEmbedding;
   readonly perception: PerceptionHead;
   readonly controller = new ClosedLoopController();
+  readonly trainingScheduler = new TrainingScheduler();
+  readonly stallDetector = new StallDetector();
+  readonly populationCtrl = new PopulationController({ maxObjects: ECOLOGY_LIMITS.MAX_OBJECTS });
   tick = 0;
   simTimeSeconds = 0;
   compositeCount = 0;
@@ -353,6 +363,7 @@ export class LiveModeEngine {
   measurementSpamPenalty = 0;
   lastControllerTarget?: string;
   lastControllerOutcomeDelta?: number;
+  private _agentIntent = 'idle';
   private readonly recentStrikeDamage: number[] = [];
   private readonly recentWoodRates: number[] = [];
   private readonly recentPredictionErrors: number[] = [];
@@ -386,6 +397,7 @@ export class LiveModeEngine {
     }));
     this.spawnedTargets = 1;
     this.spawnSuccess = 1;
+    this.trainingScheduler.start();
   }
 
   private pushFrame(frame: SegmentFrame): void {
@@ -477,12 +489,29 @@ export class LiveModeEngine {
     return this.tick % cycle < labTicks;
   }
 
+  private deriveIntent(verb: LiveVerb): string {
+    if (this.stallDetector.isInForcedExplore(this.memories[this.tick % this.memories.length]?.id ?? 1)) return 'explore';
+    if (verb === 'CONTROL' || verb === 'ANCHOR') return 'craft';
+    if (verb === 'STRIKE_WITH' || verb === 'GRIND') return 'forage';
+    if (verb === 'REST') return 'idle';
+    if (verb === 'MOVE_TO') return 'explore';
+    return 'measure';
+  }
+
   private trackDespawn(reason: string, obj: WorldObject): void {
     this.despawnByReasonCounts[reason] = (this.despawnByReasonCounts[reason] ?? 0) + 1;
     if (obj.debugFamily === 'target-visual') this.despawnedTargets += 1;
   }
 
   private cleanupDebrisOnly(): void {
+    const fragmentsTotal = [...this.world.objects.values()].filter(
+      (entry) => (entry.constituents?.length ?? 1) <= 1 && entry.debugFamily === 'fragment',
+    ).length;
+    this.populationCtrl.evaluate({
+      targetsAlive: this.world.targetYieldStats().targetsAlive,
+      objectsTotal: this.world.objects.size,
+      fragmentsTotal,
+    });
     const over = this.world.objects.size - ECOLOGY_LIMITS.MAX_OBJECTS;
     if (over <= 0) return;
     const removable = [...this.world.objects.values()]
@@ -710,7 +739,19 @@ export class LiveModeEngine {
         const worldFallback = candidates.find((entry) => entry.verb === 'STRIKE_WITH' || entry.verb === 'PICK_UP');
         if (worldFallback) chosen = worldFallback;
       }
+      // Stall detection: if forced explore, override action (skip during manufacture to avoid disrupting controller)
+      if (this.regime !== 'manufacture' && this.stallDetector.isInForcedExplore(memory.id)) {
+        // Force exploration: drop current object and pick up something new, or move
+        const exploreCandidates = candidates.filter((entry) => entry.verb === 'PICK_UP' || entry.verb === 'MOVE_TO' || entry.verb === 'DROP');
+        if (exploreCandidates.length > 0) {
+          chosen = exploreCandidates[this.world.rng.int(0, exploreCandidates.length)];
+        } else if (candidates.length > 0) {
+          chosen = candidates[this.world.rng.int(0, candidates.length)]; // random action
+        }
+      }
     }
+    // Derive agent intent label
+    this._agentIntent = this.deriveIntent(chosen.verb);
     const cost = actionCost(chosen.verb);
     if (chosen.verb !== 'REST' && memory.energy < cost) chosen = { verb: 'REST', score: 0 };
     const applyResult = chosen.verb === 'REST' ? { transformedObjectIds: [] } : this.applyCandidate(chosen);
@@ -818,6 +859,15 @@ export class LiveModeEngine {
         ? this.world.stations.get(heldAfter.id)?.quality ?? 0
         : [...this.world.stations.values()].reduce((best, station) => Math.max(best, station.quality), 0);
     this.ingestMemory(memory, chosen.verb, effectiveness, heldAfter);
+    // Record action in stall detector
+    this.stallDetector.record(
+      memory.id,
+      this.tick,
+      chosen.verb,
+      effectiveness,
+      outcome?.targetId,
+      outcome?.toolId,
+    );
     if (this.world.objects.size < objectCountBeforeAction) this.despawnedObjects += objectCountBeforeAction - this.world.objects.size;
     const replaySignature = `${this.tick}:${chosen.verb}:${outcome?.action ?? 'none'}:${(outcome?.damage ?? 0).toFixed(4)}`;
     const objects = [outcome?.toolId ?? 0, outcome?.targetId ?? 0].filter((id) => id > 0);
@@ -937,6 +987,10 @@ export class LiveModeEngine {
       dutyMode,
       manufacturingImprovements: this.manufacturingImprovements,
       milestones: milestoneEvents,
+      trainingMetrics: this.trainingScheduler.metrics(this.simTimeSeconds, this.replayBuffer.size),
+      stallMetrics: this.stallDetector.metrics(elapsedMinutes),
+      populationMetrics: this.populationCtrl.metrics(),
+      agentIntent: this._agentIntent,
     };
   }
 
@@ -946,12 +1000,18 @@ export class LiveModeEngine {
     let steps = 0;
     const maxSteps = Math.max(1, config.stepsPerTick);
     const budget = Math.max(1, config.maxTrainMsPerSecond);
+    if (this.replayBuffer.size === 0) {
+      this.trainingScheduler.setCollecting();
+      return 0;
+    }
     while (steps < maxSteps && this.trainMsThisSecond < budget) {
       const started = performance.now();
       const samples = this.replayBuffer.sampleLast(Math.max(1, config.batchSize));
       if (!samples.length) break;
+      let batchLoss = 0;
       for (const sample of samples) {
-        this.worldModel.update(sample.state.input, sample.state.outcome);
+        const err = this.worldModel.update(sample.state.input, sample.state.outcome);
+        batchLoss += err;
         if (sample.state.toolId) {
           this.embedding.update(sample.state.toolId, {
             damage: sample.state.outcome.expected_damage,
@@ -961,9 +1021,16 @@ export class LiveModeEngine {
           });
         }
       }
+      const stepDuration = performance.now() - started;
+      const avgLoss = batchLoss / Math.max(1, samples.length);
+      const actionDiversity = new Set(samples.map(s => s.action)).size / Math.max(1, samples.length);
+      this.trainingScheduler.recordStep(stepDuration, avgLoss, actionDiversity, this.simTimeSeconds);
       steps += 1;
-      this.trainMsThisSecond += performance.now() - started;
-      if (performance.now() - nowMs > budget) break;
+      this.trainMsThisSecond += stepDuration;
+      if (performance.now() - nowMs > budget) {
+        this.trainingScheduler.recordRateLimited();
+        break;
+      }
     }
     return steps;
   }

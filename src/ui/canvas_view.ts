@@ -7,6 +7,8 @@ export class CanvasView {
   selectedId?: number;
   showTrueLatentState = false;
   showWorkset = true;
+  agentIntent = 'idle';
+  agentTargetId?: number;
   private readonly canvas: HTMLCanvasElement;
   private readonly world: World;
   private readonly perception: PerceptionHead;
@@ -177,6 +179,49 @@ export class CanvasView {
       ].join('<br/>');
     } else {
       selectedEl.textContent = 'selected: none';
+    }
+
+    // Agent target line + intent label
+    const agentX = this.world.agent.pos.x * sx;
+    const agentY = this.world.agent.pos.y * sy;
+    // Draw agent as small diamond
+    ctx.fillStyle = '#ff0';
+    ctx.beginPath();
+    ctx.moveTo(agentX, agentY - 5);
+    ctx.lineTo(agentX + 4, agentY);
+    ctx.lineTo(agentX, agentY + 5);
+    ctx.lineTo(agentX - 4, agentY);
+    ctx.closePath();
+    ctx.fill();
+    // Draw line to current target
+    if (this.agentTargetId) {
+      const tgt = this.world.objects.get(this.agentTargetId);
+      if (tgt) {
+        ctx.strokeStyle = 'rgba(255,255,0,0.4)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(agentX, agentY);
+        ctx.lineTo(tgt.pos.x * sx, tgt.pos.y * sy);
+        ctx.stroke();
+      }
+    }
+    // Draw agent intent label
+    ctx.fillStyle = 'rgba(255,255,200,0.8)';
+    ctx.font = '10px system-ui';
+    ctx.fillText(this.agentIntent, agentX + 6, agentY - 6);
+    // Station overlays
+    for (const station of this.world.stations.values()) {
+      const stX = station.worldPos.x * sx;
+      const stY = station.worldPos.y * sy;
+      ctx.strokeStyle = 'rgba(200,150,255,0.5)';
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(stX, stY, 18, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(200,150,255,0.7)';
+      ctx.font = '9px system-ui';
+      ctx.fillText(`stn q=${station.quality.toFixed(2)}`, stX + 10, stY - 4);
     }
 
     logEl.textContent = this.world.logs.slice(0, 18).join('\n');

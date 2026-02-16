@@ -38,6 +38,12 @@ export interface InteractionOutcome {
   propertyChanges: number;
 }
 
+export interface PredictionRealityOverlay {
+  predicted: { damage: number; toolWear: number; fragments: number };
+  actual: { damage: number; toolWear: number; fragments: number };
+  error: { damage: number; toolWear: number; fragments: number };
+}
+
 export class World {
   readonly width = 10;
   readonly height = 10;
@@ -48,6 +54,7 @@ export class World {
   predictedStrikeArc?: StrikeArc;
   predictedStrikeDamage?: number;
   actualStrikeDamage?: number;
+  predictionRealityOverlay?: PredictionRealityOverlay;
   lastInteractionOutcome?: InteractionOutcome;
   readonly agent: AgentState = { id: 1, pos: { x: 5, y: 5 } };
   nextObjectId = 1;
@@ -66,6 +73,7 @@ export class World {
     this.predictedStrikeArc = undefined;
     this.predictedStrikeDamage = undefined;
     this.actualStrikeDamage = undefined;
+    this.predictionRealityOverlay = undefined;
     this.lastInteractionOutcome = undefined;
     this.nextObjectId = 1;
     this.agent.pos = { x: 5, y: 5 };

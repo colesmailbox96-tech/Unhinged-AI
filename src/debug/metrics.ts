@@ -9,6 +9,11 @@ export class MetricsStore {
   noveltyInteractions = 0;
   compositeRate = 0;
   embeddingClusters = 0;
+  freezePredictionError = 0;
+  randomToolDiscovery = 0;
+  agentToolDiscovery = 0;
+  interventionConfidence = 1;
+  replayDeterministic: boolean | null = null;
 
   toHtml(): string {
     const training = this.training
@@ -23,6 +28,10 @@ export class MetricsStore {
       `novel interactions: ${this.noveltyInteractions}`,
       `composite discovery rate: ${this.compositeRate.toFixed(2)}`,
       `tool embedding clusters: ${this.embeddingClusters}`,
+      `freeze prediction error trend: ${this.freezePredictionError.toFixed(3)}`,
+      `random vs agent tool discovery: ${this.randomToolDiscovery.toFixed(1)} vs ${this.agentToolDiscovery.toFixed(1)}`,
+      `decision confidence: ${this.interventionConfidence.toFixed(2)}`,
+      `deterministic replay: ${this.replayDeterministic === null ? 'not run' : this.replayDeterministic ? 'pass' : 'fail'}`,
       training,
     ].join('<br/>');
   }

@@ -53,6 +53,9 @@ export interface RunSweepConfig {
   onYield?: () => Promise<void>;
 }
 
+// Keep seed jitter large enough to avoid accidental collisions across long UI batches.
+const SEED_RANDOMIZATION_RANGE = 1_000_000;
+
 function strategyFor(interventions?: RunnerInterventions, strategy: Strategy = 'BIND_THEN_STRIKE'): Strategy {
   return interventions?.randomAgent ? 'RANDOM_STRIKE' : strategy;
 }
@@ -114,7 +117,7 @@ export async function runSweep(config: RunSweepConfig): Promise<EpisodeMetrics[]
     for (let episode = 0; episode < config.episodes; episode++) {
       if (config.shouldCancel?.()) return results;
       await config.waitWhilePaused?.();
-      const seed = config.randomizeEachEpisode ? baseSeed + Math.floor(Math.random() * 1_000_000) : baseSeed + episode;
+      const seed = config.randomizeEachEpisode ? baseSeed + Math.floor(Math.random() * SEED_RANDOMIZATION_RANGE) : baseSeed + episode;
       const metrics = runEpisode({
         seed,
         steps: config.stepsPerEpisode,

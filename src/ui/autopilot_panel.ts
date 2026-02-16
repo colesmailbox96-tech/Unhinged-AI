@@ -198,6 +198,14 @@ export class AutopilotPanel {
   }
 
   setLastEpisode(metrics: EpisodeMetrics): void {
-    this.metricsEl.innerHTML = `episode ${metrics.episode}/${metrics.totalEpisodes} | seed ${metrics.seed} | wood/min ${metrics.result.woodPerMinute.toFixed(2)} | pred err ${metrics.result.predictionErrorMean.toFixed(3)} | composite ${metrics.result.compositeDiscoveryRate.toFixed(2)} | cluster ${metrics.result.embeddingClusters}`;
+    const parts = [
+      `episode ${metrics.episode}/${metrics.totalEpisodes}`,
+      `seed ${metrics.seed}`,
+      `wood/min ${metrics.result.woodPerMinute.toFixed(2)}`,
+      `pred err ${metrics.result.predictionErrorMean.toFixed(3)}`,
+      `composite ${metrics.result.compositeDiscoveryRate.toFixed(2)}`,
+      `cluster ${metrics.result.embeddingClusters}`,
+    ];
+    this.metricsEl.innerHTML = parts.join(' | ');
   }
 }

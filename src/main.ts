@@ -34,6 +34,10 @@ function runSingle(): void {
   metrics.lastEpisode += 1;
   metrics.woodPerMinute = result.woodPerMinute;
   metrics.hardnessMae = result.hardnessMaeAfter;
+  metrics.predictionError = result.predictionErrorMean;
+  metrics.noveltyInteractions = result.noveltyCount;
+  metrics.compositeRate = result.compositeDiscoveryRate;
+  metrics.embeddingClusters = result.embeddingClusters;
   world.logs.unshift(...result.logs.slice(0, 6));
   refresh();
 }

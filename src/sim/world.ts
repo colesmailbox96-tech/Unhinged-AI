@@ -28,6 +28,16 @@ interface StrikeArc {
   alpha: number;
 }
 
+export interface InteractionOutcome {
+  action: 'BIND_TO' | 'STRIKE_WITH' | 'GRIND';
+  toolId?: ObjID;
+  targetId?: ObjID;
+  damage: number;
+  toolWear: number;
+  fragments: number;
+  propertyChanges: number;
+}
+
 export class World {
   readonly width = 10;
   readonly height = 10;
@@ -35,6 +45,10 @@ export class World {
   readonly objects = new Map<ObjID, WorldObject>();
   readonly logs: string[] = [];
   lastStrikeArc?: StrikeArc;
+  predictedStrikeArc?: StrikeArc;
+  predictedStrikeDamage?: number;
+  actualStrikeDamage?: number;
+  lastInteractionOutcome?: InteractionOutcome;
   readonly agent: AgentState = { id: 1, pos: { x: 5, y: 5 } };
   nextObjectId = 1;
   woodGained = 0;
@@ -49,6 +63,10 @@ export class World {
     this.logs.length = 0;
     this.woodGained = 0;
     this.lastStrikeArc = undefined;
+    this.predictedStrikeArc = undefined;
+    this.predictedStrikeDamage = undefined;
+    this.actualStrikeDamage = undefined;
+    this.lastInteractionOutcome = undefined;
     this.nextObjectId = 1;
     this.agent.pos = { x: 5, y: 5 };
     this.agent.heldObjectId = undefined;
@@ -140,6 +158,7 @@ export class World {
   }
 
   apply(action: PrimitiveVerb): void {
+    this.lastInteractionOutcome = undefined;
     if (action.type === 'MOVE_TO') {
       this.agent.pos.x = Math.max(0, Math.min(this.width, action.x));
       this.agent.pos.y = Math.max(0, Math.min(this.height, action.y));
@@ -174,6 +193,15 @@ export class World {
       this.objects.set(result.composite.id, result.composite);
       this.agent.heldObjectId = result.composite.id;
       this.logs.unshift(`BIND ${held.id}+${other.id} -> ${result.composite.id} (q=${result.bindingQuality.toFixed(2)})`);
+      this.lastInteractionOutcome = {
+        action: 'BIND_TO',
+        toolId: result.composite.id,
+        targetId: other.id,
+        damage: 0,
+        toolWear: Math.max(0, 1 - result.composite.integrity),
+        fragments: 0,
+        propertyChanges: result.bindingQuality,
+      };
       return;
     }
 
@@ -182,6 +210,8 @@ export class World {
       const tool = this.getObject(this.agent.heldObjectId);
       const target = this.getObject(action.targetId);
       if (!tool || !target || tool.id === target.id) return;
+      const targetIntegrityBefore = target.integrity;
+      const toolIntegrityBefore = tool.integrity;
       const result = strike(tool, target, this.rng, () => this.nextObjectId++);
       const angle = Math.atan2(target.pos.y - tool.pos.y, target.pos.x - tool.pos.x);
       this.lastStrikeArc = {
@@ -200,6 +230,16 @@ export class World {
       } else {
         this.logs.unshift(`STRIKE ${tool.id} -> target ${target.id} dmg=${result.damage.toFixed(2)}`);
       }
+      this.actualStrikeDamage = result.damage;
+      this.lastInteractionOutcome = {
+        action: 'STRIKE_WITH',
+        toolId: tool.id,
+        targetId: target.id,
+        damage: result.damage,
+        toolWear: Math.max(0, toolIntegrityBefore - tool.integrity),
+        fragments: result.fragments.length,
+        propertyChanges: Math.abs(targetIntegrityBefore - target.integrity),
+      };
       return;
     }
 
@@ -208,10 +248,20 @@ export class World {
       const held = this.getObject(this.agent.heldObjectId);
       const abrasive = this.getObject(action.abrasiveId);
       if (!held || !abrasive || held.id === abrasive.id) return;
+      const beforeSharpness = held.props.sharpness;
       const result = grind(held, abrasive);
       result.newObject.heldBy = this.agent.id;
       this.objects.set(held.id, result.newObject);
       this.logs.unshift(`GRIND ${held.id} with ${abrasive.id} wear=${result.wear.toFixed(2)}`);
+      this.lastInteractionOutcome = {
+        action: 'GRIND',
+        toolId: held.id,
+        targetId: abrasive.id,
+        damage: 0,
+        toolWear: result.wear,
+        fragments: 0,
+        propertyChanges: Math.abs(result.newObject.props.sharpness - beforeSharpness),
+      };
       return;
     }
   }

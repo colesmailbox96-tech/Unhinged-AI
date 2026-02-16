@@ -5,6 +5,10 @@ export class MetricsStore {
   lastEpisode = 0;
   woodPerMinute = 0;
   hardnessMae = 0;
+  predictionError = 0;
+  noveltyInteractions = 0;
+  compositeRate = 0;
+  embeddingClusters = 0;
 
   toHtml(): string {
     const training = this.training
@@ -15,6 +19,10 @@ export class MetricsStore {
       `episode: ${this.lastEpisode}`,
       `wood/min: ${this.woodPerMinute.toFixed(2)}`,
       `hardness MAE: ${this.hardnessMae.toFixed(3)}`,
+      `prediction error: ${this.predictionError.toFixed(3)}`,
+      `novel interactions: ${this.noveltyInteractions}`,
+      `composite discovery rate: ${this.compositeRate.toFixed(2)}`,
+      `tool embedding clusters: ${this.embeddingClusters}`,
       training,
     ].join('<br/>');
   }

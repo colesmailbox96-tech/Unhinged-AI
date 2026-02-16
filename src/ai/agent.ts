@@ -1,4 +1,6 @@
-import { PerceptionHead } from './perception';
+import { PerceptionHead, type Observation } from './perception';
+import { ToolEmbedding } from './tool_embedding';
+import { WorldModel, type WorldModelInput, type WorldModelPrediction } from './world_model';
 import { World } from '../sim/world';
 import type { ObjID, WorldObject } from '../sim/object_model';
 
@@ -9,8 +11,28 @@ export interface EpisodeResult {
   woodPerMinute: number;
   hardnessMaeBefore: number;
   hardnessMaeAfter: number;
+  predictionErrorMean: number;
+  noveltyCount: number;
+  compositeDiscoveryRate: number;
+  embeddingClusters: number;
   logs: string[];
 }
+
+interface CandidateAction {
+  verb: 'PICK_UP' | 'BIND_TO' | 'STRIKE_WITH' | 'GRIND';
+  objId?: ObjID;
+  targetId?: ObjID;
+  modelInput?: WorldModelInput;
+  predicted?: WorldModelPrediction;
+  score?: number;
+}
+
+const UTILITY_WEIGHTS = {
+  damage: 0.4,
+  fragments: 0.25,
+  propertyChanges: 0.2,
+  toolWear: 0.15,
+} as const;
 
 function chooseByPerception(world: World, perception: PerceptionHead, avoid: ObjID[] = []): WorldObject[] {
   const hidden = world.getNearbyObjectIds().filter((id) => !avoid.includes(id)).map((id) => world.objects.get(id)).filter((obj): obj is WorldObject => Boolean(obj));
@@ -26,44 +48,153 @@ function chooseByPerception(world: World, perception: PerceptionHead, avoid: Obj
   });
 }
 
+function toModelFeatures(obs: Observation): WorldModelInput['objectA'] {
+  return {
+    visual_features: (obs.visual_symmetry + obs.contact_area_estimate) * 0.5,
+    mass_estimate: obs.observed_mass_estimate,
+    length_estimate: obs.observed_length,
+    texture_proxy: obs.texture_proxy,
+    interaction_feedback_history: obs.interaction_feedback_history,
+  };
+}
+
+function buildModelInput(
+  world: World,
+  perception: PerceptionHead,
+  action_verb: WorldModelInput['action_verb'],
+  a: WorldObject,
+  b: WorldObject,
+): WorldModelInput {
+  const oa = perception.observe(a, world.rng);
+  const ob = perception.observe(b, world.rng);
+  const dx = b.pos.x - a.pos.x;
+  const dy = b.pos.y - a.pos.y;
+  return {
+    action_verb,
+    objectA: toModelFeatures(oa),
+    objectB: toModelFeatures(ob),
+    geometry_features: Math.max(0, Math.min(1, (a.length / Math.max(0.1, a.thickness) + b.length / Math.max(0.1, b.thickness)) / 12)),
+    relative_position: Math.max(0, Math.min(1, Math.hypot(dx, dy) / 3)),
+  };
+}
+
+function chooseCandidate(
+  world: World,
+  strategy: Strategy,
+  candidates: CandidateAction[],
+  worldModel: WorldModel,
+): CandidateAction | undefined {
+  if (!candidates.length) return undefined;
+  if (strategy === 'RANDOM_STRIKE') return candidates[world.rng.int(0, candidates.length)];
+  let best = candidates[0];
+  for (const candidate of candidates) {
+    if (!candidate.modelInput || !candidate.predicted) continue;
+    const curiosity = worldModel.novelty(candidate.modelInput);
+    const utility =
+      candidate.predicted.expected_damage * UTILITY_WEIGHTS.damage +
+      candidate.predicted.expected_fragments * UTILITY_WEIGHTS.fragments +
+      candidate.predicted.expected_property_changes * UTILITY_WEIGHTS.propertyChanges -
+      candidate.predicted.expected_tool_wear * UTILITY_WEIGHTS.toolWear;
+    candidate.score = curiosity + utility;
+    if ((candidate.score ?? -Infinity) > (best.score ?? -Infinity)) best = candidate;
+  }
+  return best;
+}
+
 export function runEpisode(seed: number, strategy: Strategy, perception = new PerceptionHead(seed + 77), steps = 35): EpisodeResult {
   const world = new World(seed);
+  const worldModel = new WorldModel();
+  const embedding = new ToolEmbedding();
   const initialObjects = [...world.objects.values()];
   const hardnessMaeBefore = perception.hardnessError(initialObjects, world.rng.clone());
+  const predictionErrors: number[] = [];
+  let noveltyCount = 0;
+  let compositeDiscoveries = 0;
 
   const pickables = chooseByPerception(world, perception);
   if (pickables[0]) world.apply({ type: 'PICK_UP', objId: pickables[0].id });
 
-  if (strategy === 'BIND_THEN_STRIKE' && pickables[1]) {
-    world.apply({ type: 'BIND_TO', objId: pickables[1].id });
-  }
-
   for (let i = 0; i < steps; i++) {
-    if (strategy === 'RANDOM_STRIKE') {
-      const nearby = world.getNearbyObjectIds().filter((id) => id !== world.getTargetId());
-      const randomId = nearby[world.rng.int(0, Math.max(1, Math.floor(nearby.length * 0.6)))];
-      if (randomId) world.apply({ type: 'PICK_UP', objId: randomId });
-    }
-
-    const targetId = world.getTargetId();
-    if (!targetId) continue;
-
-    if (i % 6 === 0 && strategy === 'BIND_THEN_STRIKE') {
-      const candidates = chooseByPerception(world, perception, [world.agent.heldObjectId ?? -1]);
-      if (candidates[0] && world.agent.heldObjectId) world.apply({ type: 'BIND_TO', objId: candidates[0].id });
-    }
-
-    if (i % 4 === 0) {
-      const abrasive = chooseByPerception(world, perception, [world.agent.heldObjectId ?? -1])[0];
-      if (abrasive) world.apply({ type: 'GRIND', abrasiveId: abrasive.id });
-    }
-
-    world.apply({ type: 'STRIKE_WITH', targetId });
-
     const held = world.agent.heldObjectId ? world.objects.get(world.agent.heldObjectId) : undefined;
-    if (held) {
-      const obs = perception.observe(held, world.rng);
-      perception.train(obs, held.props, 1);
+    const targetId = world.getTargetId();
+    const target = targetId ? world.objects.get(targetId) : undefined;
+    const candidates: CandidateAction[] = [];
+
+    if (!held) {
+      for (const candidate of chooseByPerception(world, perception).slice(0, 3)) {
+        candidates.push({ verb: 'PICK_UP', objId: candidate.id, score: 0.05 });
+      }
+    } else {
+      if (target && target.id !== held.id) {
+        const modelInput = buildModelInput(world, perception, 'STRIKE_WITH', held, target);
+        const predicted = worldModel.predict(modelInput);
+        const angle = Math.atan2(target.pos.y - held.pos.y, target.pos.x - held.pos.x);
+        world.predictedStrikeArc = {
+          center: { ...held.pos },
+          radius: Math.max(0.4, held.length * 0.5),
+          start: angle - 0.55,
+          end: angle + 0.25,
+          alpha: 0.45,
+        };
+        world.predictedStrikeDamage = predicted.expected_damage;
+        candidates.push({ verb: 'STRIKE_WITH', targetId: target.id, modelInput, predicted });
+      }
+
+      for (const nearby of chooseByPerception(world, perception, [held.id]).slice(0, 2)) {
+        const bindInput = buildModelInput(world, perception, 'BIND_TO', held, nearby);
+        candidates.push({
+          verb: 'BIND_TO',
+          objId: nearby.id,
+          modelInput: bindInput,
+          predicted: worldModel.predict(bindInput),
+        });
+
+        const grindInput = buildModelInput(world, perception, 'GRIND', held, nearby);
+        candidates.push({
+          verb: 'GRIND',
+          objId: nearby.id,
+          modelInput: grindInput,
+          predicted: worldModel.predict(grindInput),
+        });
+      }
+    }
+
+    const chosen = chooseCandidate(world, strategy, candidates, worldModel);
+    if (!chosen) continue;
+
+    if (chosen.verb === 'PICK_UP' && chosen.objId) world.apply({ type: 'PICK_UP', objId: chosen.objId });
+    if (chosen.verb === 'BIND_TO' && chosen.objId) {
+      world.apply({ type: 'BIND_TO', objId: chosen.objId });
+      compositeDiscoveries += 1;
+    }
+    if (chosen.verb === 'GRIND' && chosen.objId) world.apply({ type: 'GRIND', abrasiveId: chosen.objId });
+    if (chosen.verb === 'STRIKE_WITH' && chosen.targetId) world.apply({ type: 'STRIKE_WITH', targetId: chosen.targetId });
+
+    const outcome = world.lastInteractionOutcome;
+    if (outcome?.toolId) {
+      embedding.update(outcome.toolId, {
+        damage: outcome.damage,
+        toolWear: outcome.toolWear,
+        fragments: outcome.fragments,
+        propertyChanges: outcome.propertyChanges,
+      });
+    }
+
+    if (chosen.modelInput && strategy !== 'RANDOM_STRIKE' && outcome) {
+      const predictionError = worldModel.update(chosen.modelInput, {
+        expected_damage: outcome.damage,
+        expected_tool_wear: outcome.toolWear,
+        expected_fragments: outcome.fragments,
+        expected_property_changes: outcome.propertyChanges,
+      });
+      predictionErrors.push(predictionError);
+      if (predictionError > 0.08) noveltyCount += 1;
+    }
+
+    const heldAfter = world.agent.heldObjectId ? world.objects.get(world.agent.heldObjectId) : undefined;
+    if (heldAfter) {
+      const obs = perception.observe(heldAfter, world.rng);
+      perception.train(obs, heldAfter.props, 1);
     }
   }
 
@@ -73,6 +204,10 @@ export function runEpisode(seed: number, strategy: Strategy, perception = new Pe
     woodPerMinute: world.woodGained / (steps / 60),
     hardnessMaeBefore,
     hardnessMaeAfter,
+    predictionErrorMean: predictionErrors.reduce((a, b) => a + b, 0) / Math.max(1, predictionErrors.length),
+    noveltyCount,
+    compositeDiscoveryRate: compositeDiscoveries / Math.max(1, steps),
+    embeddingClusters: embedding.clusterCount(),
     logs: world.logs.slice(0, 25),
   };
 }

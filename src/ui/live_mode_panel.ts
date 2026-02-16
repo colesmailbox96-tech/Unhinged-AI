@@ -26,6 +26,8 @@ export interface LiveModePanelHandlers {
   onBookmark: () => void;
   onReplayBookmark: (bookmarkId: string) => void;
   onTimelineJump: (milestoneId: number) => void;
+  onTogglePinWorkset: (value: boolean) => void;
+  onToggleShowWorkset: (value: boolean) => void;
 }
 
 export class LiveModePanel {
@@ -51,9 +53,11 @@ export class LiveModePanel {
           <label>batchSize <input data-live="batchSize" type="number" min="1" value="8" /></label>
           <label>maxTrainMs/sec <input data-live="trainBudget" type="number" min="1" value="35" /></label>
           <label>Rolling record (sec) <input data-live="rollingSeconds" type="number" min="5" value="30" /></label>
-          <label><input data-live="deterministic" type="checkbox" /> Deterministic Live</label>
-          <label><input data-live="showLatentDebug" type="checkbox" /> Show true latent state (debug)</label>
-        </div>
+           <label><input data-live="deterministic" type="checkbox" /> Deterministic Live</label>
+           <label><input data-live="showLatentDebug" type="checkbox" /> Show true latent state (debug)</label>
+           <label><input data-live="pinWorkset" type="checkbox" /> Pin workset</label>
+           <label><input data-live="showWorkset" type="checkbox" checked /> Show workset</label>
+         </div>
         <div style="margin-top:6px">
           <button data-live="start">Start Live</button>
           <button data-live="pause">Pause</button>
@@ -99,6 +103,12 @@ export class LiveModePanel {
       const target = event.target as HTMLElement | null;
       const id = target?.getAttribute('data-milestone');
       if (id) handlers.onTimelineJump(Number(id));
+    });
+    (panel.querySelector('[data-live="pinWorkset"]') as HTMLInputElement).addEventListener('change', (event) => {
+      handlers.onTogglePinWorkset((event.target as HTMLInputElement).checked);
+    });
+    (panel.querySelector('[data-live="showWorkset"]') as HTMLInputElement).addEventListener('change', (event) => {
+      handlers.onToggleShowWorkset((event.target as HTMLInputElement).checked);
     });
     container.insertBefore(panel, container.firstChild);
   }

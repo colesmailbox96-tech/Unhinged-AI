@@ -70,6 +70,7 @@ let livePaused = false;
 let liveFastForward = false;
 let liveLastRenderedTick = 0;
 let showTrueLatentState = false;
+let showWorksetOverlay = true;
 const liveTimeline: import('./sim/milestones').MilestoneEvent[] = [];
 const liveMetricHistory: LiveTickResult[] = [];
 
@@ -89,6 +90,7 @@ function refresh(): void {
   ].join('<br/>');
   embeddingVizEl.innerHTML = renderEmbedding(lastEmbeddingSnapshot);
   view.showTrueLatentState = showTrueLatentState;
+  view.showWorkset = showWorksetOverlay;
   view.render(selectedEl, logEl);
 }
 
@@ -281,6 +283,7 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
   liveLastRenderedTick = result.tick;
   world = liveEngine.world;
   view = new CanvasView(canvas, world, perception);
+  view.showWorkset = showWorksetOverlay;
   const windowAverages = (seconds: number): { wood: number; pred: number; novelty: number; composite: number; clusters: number } => {
     const windowRows = liveMetricHistory.filter((entry) => result.simTimeSeconds - entry.simTimeSeconds <= seconds);
     const avg = (pick: (entry: LiveTickResult) => number): number =>
@@ -314,9 +317,15 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
     `objects=${result.objectsTotal} fragments=${result.fragmentsTotal} despawned/min=${result.despawnedPerMin.toFixed(2)}`,
     `energy avg=${result.avgEnergy.toFixed(3)} idle=${result.idleFraction.toFixed(3)} actions/min=${result.actionsPerMin.toFixed(2)}`,
     `measurement useful rate=${result.measurementUsefulRate.toFixed(3)} total=${result.measurementTotal} spamPenalty=${result.measurementSpamPenalty.toFixed(3)}`,
-    `controller steps/min=${result.controllerStepsPerMin.toFixed(2)} lastTarget=${result.lastControllerTarget ?? 'n/a'} Δ=${(result.lastControllerOutcomeDelta ?? 0).toFixed(3)}`,
+    `controllerState=${result.controllerState} steps60s=${result.controllerStepsLast60s} eval60s=${result.controllerEvaluationsLast60s} steps/min=${result.controllerStepsPerMin.toFixed(2)}`,
+    `lastTarget=${result.lastControllerTarget ?? 'n/a'} Δ=${(result.lastControllerOutcomeDelta ?? 0).toFixed(3)} improvements=${result.manufacturingImprovements}`,
     `embedding clusters=${result.embeddingClusters} windowN=${result.embeddingsInWindow}`,
-    `station quality=${result.stationQuality.toFixed(3)} stations=${liveEngine.world.stations.size}`,
+    `station quality=${result.stationQuality.toFixed(3)} activeStation=${result.activeStationId ?? 'n/a'} activeQ=${result.activeStationQuality.toFixed(3)} dist=${(result.distanceToActiveStation ?? 0).toFixed(2)}`,
+    `stations=${result.stationQualities.map((entry) => `${entry.id}:${entry.quality.toFixed(3)}`).join(', ') || 'none'}`,
+    `duty=${result.dutyMode} lab=${result.dutyCycleLab.toFixed(2)} world=${result.dutyCycleWorld.toFixed(2)} timeInRegime=${result.timeInRegime.toFixed(1)}s`,
+    `workset size=${result.worksetSize} age=${result.worksetAgeSec.toFixed(1)}s home=${result.worksetHomeStationId ?? 'n/a'} atStation=${result.worksetAtStationFraction.toFixed(2)} avgDist=${result.avgDistanceToStation.toFixed(2)}`,
+    `haul trips/min=${result.haulTripsPerMin.toFixed(2)} ids=[${result.worksetIds.join(',')}]`,
+    `spawnSuccess/min=${result.spawnSuccessPerMin.toFixed(2)} purgedNonDebris/min=${result.purgedNonDebrisPerMin.toFixed(2)} despawnedTargets/min=${result.despawnedTargetsPerMin.toFixed(2)}`,
     latestMeasurement
       ? `mass CI=[${latestMeasurement.ciLow.toFixed(3)}, ${latestMeasurement.ciHigh.toFixed(3)}] σ=${latestMeasurement.sigma.toFixed(4)} n=${latestMeasurement.sampleCount}`
       : 'mass CI: n/a',
@@ -327,7 +336,7 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
     result.controllerTarget
       ? `controller ${result.controllerTarget.metric}: target=${result.controllerTarget.target.toFixed(3)} achieved=${result.controllerTarget.achieved.toFixed(3)}`
       : 'controller: idle',
-    `object count=${liveEngine.world.objects.size}`,
+    `object count=${liveEngine.world.objects.size} despawnByReason=${Object.entries(result.despawnByReason).map(([k, v]) => `${k}:${v}`).join(',') || 'none'}`,
   ]);
   livePanel.setTimeline(liveTimeline);
   refresh();
@@ -351,6 +360,7 @@ function startLiveMode(config: LiveModePanelConfig, livePanel: LiveModePanel): v
   world = liveEngine.world;
   view = new CanvasView(canvas, world, perception);
   view.showTrueLatentState = showTrueLatentState;
+  view.showWorkset = showWorksetOverlay;
   const startAt = performance.now();
   const maxRuntimeMs = config.runIndefinitely ? Number.POSITIVE_INFINITY : config.durationMinutes * 60_000;
   const simulationBatch = (): void => {
@@ -422,6 +432,12 @@ const livePanel = new LiveModePanel(panelEl, {
       world.logs.unshift(`Timeline jump: milestone ${milestone.kind}`);
     }
     refresh();
+  },
+  onTogglePinWorkset: (value) => {
+    liveEngine?.setPinWorkset(value);
+  },
+  onToggleShowWorkset: (value) => {
+    showWorksetOverlay = value;
   },
 });
 

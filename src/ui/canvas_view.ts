@@ -6,6 +6,7 @@ import { World } from '../sim/world';
 export class CanvasView {
   selectedId?: number;
   showTrueLatentState = false;
+  showWorkset = true;
   private readonly canvas: HTMLCanvasElement;
   private readonly world: World;
   private readonly perception: PerceptionHead;
@@ -123,6 +124,27 @@ export class CanvasView {
         ctx.arc(x, y, radius + 4, 0, Math.PI * 2);
         ctx.stroke();
       }
+      if (this.showWorkset && this.world.worksetDebugIds.includes(obj.id)) {
+        ctx.strokeStyle = '#ff7f7f';
+        ctx.beginPath();
+        ctx.arc(x, y, radius + 3, 0, Math.PI * 2);
+        ctx.stroke();
+        if (this.world.worksetDropZone) {
+          ctx.strokeStyle = 'rgba(255,127,127,0.35)';
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(this.world.worksetDropZone.x * sx, this.world.worksetDropZone.y * sy);
+          ctx.stroke();
+        }
+      }
+    }
+    if (this.showWorkset && this.world.worksetDropZone) {
+      ctx.strokeStyle = '#ff7f7f';
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(this.world.worksetDropZone.x * sx, this.world.worksetDropZone.y * sy, 12, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
 
     if (this.world.predictionRealityOverlay) {

@@ -4,6 +4,7 @@ import type { World } from '../sim/world';
 
 export type ControllerTargetMetric = 'surface_planarity' | 'microstructure_order' | 'impurity_level' | 'repeatability_strike_damage';
 export type ControllerVerb = 'GRIND' | 'HEAT' | 'SOAK' | 'COOL';
+export type ControllerRuntimeState = 'idle' | 'selecting_target' | 'tuning' | 'evaluating' | 'converged' | 'blocked';
 
 export interface ControllerTarget {
   metric: ControllerTargetMetric;
@@ -17,6 +18,8 @@ export interface ControllerStep {
   measured: MeasurementResult;
   achieved: number;
   error: number;
+  applied: boolean;
+  state: ControllerRuntimeState;
 }
 
 interface ControllerState {
@@ -32,6 +35,15 @@ function clamp01(v: number): number {
 
 export class ClosedLoopController {
   private readonly states = new Map<string, ControllerState>();
+  private runtimeState: ControllerRuntimeState = 'idle';
+
+  currentState(): ControllerRuntimeState {
+    return this.runtimeState;
+  }
+
+  setIdle(): void {
+    this.runtimeState = 'idle';
+  }
 
   private keyFor(objectId: number, target: ControllerTarget): string {
     return `${objectId}:${target.metric}:${target.target.toFixed(3)}`;
@@ -52,6 +64,7 @@ export class ClosedLoopController {
   }
 
   step(world: World, held: WorldObject, target: ControllerTarget): ControllerStep {
+    this.runtimeState = 'selecting_target';
     const key = this.keyFor(held.id, target);
     const state = this.states.get(key) ?? { param: 0.5, direction: 1 as const, bestError: Number.POSITIVE_INFINITY };
     const verb = this.chooseVerb(target.metric);
@@ -64,15 +77,32 @@ export class ClosedLoopController {
     if (state.lastError !== undefined && errorBefore > state.lastError) state.direction = state.direction === 1 ? -1 : 1;
     const stepSize = errorBefore > 0.2 ? 0.15 : 0.06;
     state.param = clamp01(state.param + state.direction * stepSize);
+    let applied = false;
+    this.runtimeState = 'tuning';
     if (verb === 'GRIND') {
-      const abrasiveId = world
-        .getNearbyObjectIds()
-        .find((id) => id !== held.id);
-      if (abrasiveId) world.apply({ type: 'GRIND', abrasiveId, intensity: state.param });
+      const abrasiveId =
+        world.getNearbyObjectIds().find((id) => id !== held.id) ??
+        [...world.objects.keys()].find((id) => id !== held.id);
+      if (abrasiveId) {
+        world.apply({ type: 'GRIND', abrasiveId, intensity: state.param });
+        applied = true;
+      } else {
+        this.runtimeState = 'blocked';
+      }
     }
-    if (verb === 'HEAT') world.apply({ type: 'HEAT', intensity: state.param });
-    if (verb === 'SOAK') world.apply({ type: 'SOAK', intensity: state.param });
-    if (verb === 'COOL') world.apply({ type: 'COOL', intensity: state.param });
+    if (verb === 'HEAT') {
+      world.apply({ type: 'HEAT', intensity: state.param });
+      applied = true;
+    }
+    if (verb === 'SOAK') {
+      world.apply({ type: 'SOAK', intensity: state.param });
+      applied = true;
+    }
+    if (verb === 'COOL') {
+      world.apply({ type: 'COOL', intensity: state.param });
+      applied = true;
+    }
+    this.runtimeState = 'evaluating';
     const refreshed = world.objects.get(held.id) ?? held;
     const measured = this.measureFor(refreshed, world, target.metric);
     const achieved =
@@ -83,12 +113,16 @@ export class ClosedLoopController {
     state.lastError = error;
     state.bestError = Math.min(state.bestError, error);
     this.states.set(key, state);
+    if (!applied) this.runtimeState = 'blocked';
+    else if (error <= 0.08) this.runtimeState = 'converged';
     return {
       verb,
       intensity: state.param,
       measured,
       achieved,
       error,
+      applied,
+      state: this.runtimeState,
     };
   }
 }

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Property Emergence</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; background: #10151f; color: #d7e0f0; }
+      #app { display: grid; grid-template-columns: 1fr 340px; height: 100vh; }
+      #worldCanvas { width: 100%; height: 100%; background: #0a0f17; }
+      #panel { padding: 12px; overflow: auto; border-left: 1px solid #273248; }
+      button { margin: 4px 4px 4px 0; padding: 6px 10px; }
+      .metric { font-size: 12px; margin: 6px 0; }
+      pre { white-space: pre-wrap; font-size: 12px; background: #0d1420; padding: 8px; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="worldCanvas" width="980" height="700"></canvas>
+      <div id="panel">
+        <div>
+          <button id="resetBtn">Reset(seed)</button>
+          <button id="trainBtn">Train 100 episodes</button>
+          <button id="runBtn">Run single episode</button>
+          <button id="pauseBtn">Pause</button>
+          <button id="stepBtn">Step</button>
+        </div>
+        <div id="metrics" class="metric"></div>
+        <div id="selected" class="metric"></div>
+        <pre id="log"></pre>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

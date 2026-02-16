@@ -1,0 +1,19 @@
+{
+  "name": "unhinged-ai",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "train": "tsx src/train.ts",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18"
+  }
+}

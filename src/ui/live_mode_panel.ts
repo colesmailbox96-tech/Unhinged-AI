@@ -123,14 +123,22 @@ export class LiveModePanel {
     this.timelineEl.innerHTML = events
       .slice()
       .reverse()
-      .map(
-        (event) =>
-          `<button data-milestone="${event.id}" style="display:block;width:100%;text-align:left;margin:2px 0">t=${event.timestamp.toFixed(1)}s agent=${event.agentId} ${event.kind}</button>`,
-      )
+      .map((event) => {
+        const label = `t=${event.timestamp.toFixed(1)}s agent=${event.agentId} ${event.kind}`;
+        return `<button data-milestone="${Number(event.id)}" style="display:block;width:100%;text-align:left;margin:2px 0">${label
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')}</button>`;
+      })
       .join('');
   }
 
   setBookmarks(bookmarkIds: string[]): void {
-    this.bookmarkEl.innerHTML = bookmarkIds.map((bookmarkId) => `<option value="${bookmarkId}">${bookmarkId}</option>`).join('');
+    this.bookmarkEl.innerHTML = bookmarkIds
+      .map((bookmarkId) => {
+        const safe = bookmarkId.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+        return `<option value="${safe}">${safe}</option>`;
+      })
+      .join('');
   }
 }

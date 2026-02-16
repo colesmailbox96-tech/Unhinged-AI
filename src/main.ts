@@ -329,8 +329,7 @@ function startLiveMode(config: LiveModePanelConfig, livePanel: LiveModePanel): v
     if (livePaused) return;
     const ticksToRun = liveFastForward ? Math.max(10, liveConfig.renderEveryNTicks * 2) : 1;
     for (let i = 0; i < ticksToRun; i++) {
-      const bookmark = liveEngine.bookmarks[0]?.id;
-      const tickResult = liveEngine.tickOnce(bookmark);
+      const tickResult = liveEngine.tickOnce();
       if (tickResult.milestones.length) {
         liveTimeline.push(...tickResult.milestones);
         livePanel.setTimeline(liveTimeline);
@@ -387,10 +386,9 @@ const livePanel = new LiveModePanel(panelEl, {
   onTimelineJump: (milestoneId) => {
     const milestone = liveTimeline.find((entry) => entry.id === milestoneId);
     if (!milestone || !liveEngine) return;
-    const focusObject = milestone.objectIds.length ? liveEngine.world.objects.get(milestone.objectIds[0]) : undefined;
-    if (focusObject) {
-      liveEngine.world.agent.pos = { ...focusObject.pos };
-      world.logs.unshift(`Timeline jump: milestone ${milestone.kind}, focusing object ${focusObject.id}`);
+    const focusId = milestone.objectIds[0];
+    if (focusId && liveEngine.focusOnObject(focusId)) {
+      world.logs.unshift(`Timeline jump: milestone ${milestone.kind}, focusing object ${focusId}`);
     } else {
       world.logs.unshift(`Timeline jump: milestone ${milestone.kind}`);
     }

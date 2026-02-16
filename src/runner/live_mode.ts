@@ -268,13 +268,11 @@ export class LiveModeEngine {
     if (this.world.rng.float() < 0.01) this.world.spawnTarget();
   }
 
-  tickOnce(bookmarkId?: string): LiveTickResult {
+  tickOnce(): LiveTickResult {
     this.tick += 1;
     this.simTimeSeconds = this.tick / Math.max(1, this.config.ticksPerSecond);
     this.ensureEcologyPressure();
-    const memoryIndex = this.config.deterministic
-      ? this.tick % this.memories.length
-      : Math.floor(Math.random() * this.memories.length);
+    const memoryIndex = this.config.deterministic ? this.tick % this.memories.length : this.world.rng.int(0, this.memories.length);
     const memory = this.memories[memoryIndex];
     memory.energy = Math.min(1, memory.energy + 0.015);
     const held = this.world.agent.heldObjectId ? this.world.objects.get(this.world.agent.heldObjectId) : undefined;
@@ -332,7 +330,7 @@ export class LiveModeEngine {
         predictionError,
         effectiveness,
       },
-      bookmarkId,
+      undefined,
     );
     const elapsedMinutes = Math.max(1 / 60, this.simTimeSeconds / 60);
     return {
@@ -392,6 +390,13 @@ export class LiveModeEngine {
   replayBookmark(id: string): SegmentFrame[] {
     const bookmark = this.bookmarks.find((entry) => entry.id === id);
     return bookmark ? bookmark.frames.map((frame) => ({ ...frame, objectIds: [...frame.objectIds] })) : [];
+  }
+
+  focusOnObject(objectId: number): boolean {
+    const object = this.world.objects.get(objectId);
+    if (!object) return false;
+    this.world.agent.pos = { ...object.pos };
+    return true;
   }
 
   createSnapshot(): LiveSnapshot {

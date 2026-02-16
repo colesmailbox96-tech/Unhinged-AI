@@ -60,6 +60,47 @@ describe('runner shared API', () => {
     expect(engine.milestones.all().length).toBeGreaterThan(0);
   });
 
+  test('measurement spam reward saturates after repeated non-useful reads', () => {
+    const engine = new LiveModeEngine({
+      seed: 909,
+      populationSize: 1,
+      ticksPerSecond: 20,
+      deterministic: true,
+      rollingSeconds: 30,
+    });
+    const series = engine.measurementSpamSeries(99, 12);
+    expect(series[0]).toBeGreaterThan(0);
+    expect(series[4]).toBeLessThanOrEqual(0);
+    expect(series.at(-1) ?? 0).toBeLessThanOrEqual(-0.05);
+  });
+
+  test('live mode transitions into manufacture and activates controller', () => {
+    const engine = new LiveModeEngine({
+      seed: 1337,
+      populationSize: 1,
+      ticksPerSecond: 20,
+      deterministic: true,
+      rollingSeconds: 60,
+    });
+    let last = engine.tickOnce();
+    for (let i = 0; i < 2_000 && last.regime !== 'manufacture'; i++) {
+      last = engine.tickOnce();
+      if (i % 5 === 0) {
+        engine.trainChunk({
+          trainEveryMs: 50,
+          batchSize: 6,
+          maxTrainMsPerSecond: 45,
+          stepsPerTick: 2,
+        });
+      }
+    }
+    for (let i = 0; i < 300; i++) last = engine.tickOnce();
+    expect(last.regime).toBe('manufacture');
+    expect(last.controllerStepsPerMin).toBeGreaterThan(0);
+    expect(last.measurementUsefulRate).toBeGreaterThan(0);
+    expect(Math.max(last.stationQuality, engine.world.stations.size)).toBeGreaterThan(0);
+  });
+
   test('controller improves planarity over baseline across trials', () => {
     const runTrial = (seed: number, useController: boolean): number => {
       const world = new World(seed);

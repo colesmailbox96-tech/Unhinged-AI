@@ -10,6 +10,7 @@ import { MilestoneTracker, type MilestoneEvent } from '../sim/milestones';
 import type { MeasurementResult } from '../sim/metrology';
 
 type LiveVerb = 'PICK_UP' | 'BIND_TO' | 'STRIKE_WITH' | 'GRIND' | 'HEAT' | 'SOAK' | 'COOL' | 'ANCHOR' | 'CONTROL' | 'REST';
+export type LiveRegime = 'explore' | 'exploit' | 'manufacture';
 
 interface CandidateAction {
   verb: LiveVerb;
@@ -67,6 +68,29 @@ export interface LiveTickResult {
   controllerTarget?: { metric: string; target: number; achieved: number };
   measurements: MeasurementResult[];
   stationQuality: number;
+  regime: LiveRegime;
+  timeInRegime: number;
+  regimeChangeReason?: string;
+  biomassAvg: number;
+  biomassMin: number;
+  avgTargetYield: number;
+  targetsAlive: number;
+  spawnedPerMin: number;
+  destroyedPerMin: number;
+  objectsTotal: number;
+  fragmentsTotal: number;
+  despawnedPerMin: number;
+  measurementUsefulRate: number;
+  measurementUseful: boolean;
+  measurementTotal: number;
+  measurementSpamPenalty: number;
+  avgEnergy: number;
+  idleFraction: number;
+  actionsPerMin: number;
+  controllerStepsPerMin: number;
+  lastControllerTarget?: string;
+  lastControllerOutcomeDelta?: number;
+  embeddingsInWindow: number;
   milestones: MilestoneEvent[];
 }
 
@@ -106,6 +130,8 @@ export interface LiveSnapshot {
     repeatabilityScore: number;
     precisionScore: number;
     stationCount: number;
+    regime: LiveRegime;
+    timeInRegime: number;
   };
   modelState: {
     worldModel: ReturnType<WorldModel['snapshot']>;
@@ -120,6 +146,55 @@ const UTILITY_WEIGHTS = {
   propertyChanges: 0.2,
   toolWear: 0.15,
 } as const;
+
+const REGIME_THRESHOLDS = {
+  EXPLORE_TO_EXPLOIT_MIN_SECONDS: 25,
+  EXPLORE_TO_EXPLOIT_MAX_ERROR: 0.22,
+  MANUFACTURE_WINDOW_SECONDS: 30,
+  MANUFACTURE_MIN_REGIME_SECONDS: 20,
+  MANUFACTURE_MAX_NOVELTY_PER_MIN: 8,
+  MANUFACTURE_MAX_PREDICTION_ERROR: 0.2,
+  MANUFACTURE_MAX_WOOD_VARIANCE: 120,
+} as const;
+
+const CONTROL_THRESHOLDS = {
+  MIN_PLANARITY_FOR_CONTROL: 0.65,
+  MIN_MICROSTRUCTURE_FOR_CONTROL: 0.65,
+} as const;
+
+const MANUFACTURE_FORCE_INTERVALS = {
+  ANCHOR_TICKS: 5,
+  CONTROL_TICKS: 3,
+} as const;
+
+const MEASUREMENT_SPAM_POLICY = {
+  FREE_REPEATS: 3,
+  EARLY_REWARD: 0.02,
+  PENALTY_STEP: 0.01,
+  MAX_PENALTY: 0.08,
+} as const;
+
+const ACTION_ENERGY_COST: Partial<Record<LiveVerb, number>> = {
+  STRIKE_WITH: 0.16,
+  GRIND: 0.1,
+  BIND_TO: 0.09,
+  HEAT: 0.08,
+  SOAK: 0.08,
+  COOL: 0.07,
+  ANCHOR: 0.09,
+  CONTROL: 0.11,
+  PICK_UP: 0.04,
+};
+
+function actionCost(action: LiveVerb): number {
+  return ACTION_ENERGY_COST[action] ?? 0.03;
+}
+
+function variance(values: number[]): number {
+  if (values.length < 2) return 0;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  return values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+}
 
 function chooseByPerception(world: World, perception: PerceptionHead, avoid: ObjID[] = []): WorldObject[] {
   const hidden = world
@@ -174,6 +249,7 @@ function chooseCandidate(
   candidates: CandidateAction[],
   worldModel: WorldModel,
   noveltyWindow: Map<string, number>,
+  regime: LiveRegime,
 ): CandidateAction | undefined {
   if (!candidates.length) return undefined;
   let best = candidates[0];
@@ -187,7 +263,8 @@ function chooseCandidate(
       candidate.predicted.expected_fragments * UTILITY_WEIGHTS.fragments +
       candidate.predicted.expected_property_changes * UTILITY_WEIGHTS.propertyChanges -
       candidate.predicted.expected_tool_wear * UTILITY_WEIGHTS.toolWear;
-    candidate.score = curiosity + utility;
+    const regimeUtilityScale = regime === 'manufacture' && candidate.verb === 'STRIKE_WITH' ? 0.45 : 1;
+    candidate.score = curiosity + utility * regimeUtilityScale;
     if ((candidate.score ?? -Infinity) > (best.score ?? -Infinity)) best = candidate;
   }
   if (best.modelInput) {
@@ -215,7 +292,28 @@ export class LiveModeEngine {
   trainMsThisSecond = 0;
   repeatabilityScore = 0;
   precisionScore = 0;
+  regime: LiveRegime = 'explore';
+  regimeSinceSeconds = 0;
+  lastRegimeChangeReason = '';
+  spawnedTargets = 0;
+  destroyedTargets = 0;
+  despawnedObjects = 0;
+  totalActions = 0;
+  idleTicks = 0;
+  controllerSteps = 0;
+  measurementTotal = 0;
+  measurementUsefulCount = 0;
+  measurementSpamPenalty = 0;
+  lastControllerTarget?: string;
+  lastControllerOutcomeDelta?: number;
   private readonly recentStrikeDamage: number[] = [];
+  private readonly recentWoodRates: number[] = [];
+  private readonly recentPredictionErrors: number[] = [];
+  private readonly recentNoveltyRates: number[] = [];
+  private readonly processChain: LiveVerb[] = [];
+  private readonly objectLastTransformedTick = new Map<number, number>();
+  private readonly objectLastMeasuredTick = new Map<number, number>();
+  private readonly measurementRepeatCount = new Map<number, number>();
   private readonly noveltyWindow = new Map<string, number>();
   private readonly config: LiveModeConfig;
 
@@ -235,6 +333,7 @@ export class LiveModeEngine {
       goodTools: [],
       goodLocations: [],
     }));
+    this.spawnedTargets = 1;
   }
 
   private pushFrame(frame: SegmentFrame): void {
@@ -259,6 +358,55 @@ export class LiveModeEngine {
         memory.goodLocations = memory.goodLocations.slice(0, 8);
       }
     }
+  }
+
+  private shiftRegime(next: LiveRegime, reason: string): void {
+    if (this.regime === next) return;
+    this.regime = next;
+    this.regimeSinceSeconds = this.simTimeSeconds;
+    this.lastRegimeChangeReason = `t=${this.simTimeSeconds.toFixed(1)} ${reason}`;
+    this.world.logs.unshift(`REGIME ${this.regime.toUpperCase()} ${this.lastRegimeChangeReason}`);
+  }
+
+  private maybeUpdateRegime(): void {
+    if (
+      this.regime === 'explore' &&
+      this.simTimeSeconds >= REGIME_THRESHOLDS.EXPLORE_TO_EXPLOIT_MIN_SECONDS &&
+      this.worldModel.meanPredictionError() <= REGIME_THRESHOLDS.EXPLORE_TO_EXPLOIT_MAX_ERROR
+    ) {
+      this.shiftRegime('exploit', 'prediction error stabilized');
+    }
+    const windowSeconds = REGIME_THRESHOLDS.MANUFACTURE_WINDOW_SECONDS;
+    const windowSize = Math.max(10, Math.round(windowSeconds * Math.max(1, this.config.ticksPerSecond)));
+    const noveltyWindow = this.recentNoveltyRates.slice(-windowSize);
+    const predictionWindow = this.recentPredictionErrors.slice(-windowSize);
+    const woodWindow = this.recentWoodRates.slice(-windowSize);
+    const noveltyAvg = noveltyWindow.reduce((sum, value) => sum + value, 0) / Math.max(1, noveltyWindow.length);
+    const predictionAvg = predictionWindow.reduce((sum, value) => sum + value, 0) / Math.max(1, predictionWindow.length);
+    const woodVariance = variance(woodWindow);
+    if (
+      this.regime !== 'manufacture' &&
+      this.simTimeSeconds - this.regimeSinceSeconds > REGIME_THRESHOLDS.MANUFACTURE_MIN_REGIME_SECONDS &&
+      noveltyWindow.length >= windowSize &&
+      noveltyAvg < REGIME_THRESHOLDS.MANUFACTURE_MAX_NOVELTY_PER_MIN &&
+      predictionAvg < REGIME_THRESHOLDS.MANUFACTURE_MAX_PREDICTION_ERROR &&
+      woodVariance < REGIME_THRESHOLDS.MANUFACTURE_MAX_WOOD_VARIANCE
+    ) {
+      this.shiftRegime('manufacture', `novel/min=${noveltyAvg.toFixed(2)} pred=${predictionAvg.toFixed(3)} woodVar=${woodVariance.toFixed(2)}`);
+    }
+  }
+
+  private processChainLength(): number {
+    return new Set(this.processChain.slice(-6)).size;
+  }
+
+  private measurementRewardFor(objId: number, useful: boolean): { reward: number; penalty: number; repeats: number } {
+    const repeats = (this.measurementRepeatCount.get(objId) ?? 0) + 1;
+    this.measurementRepeatCount.set(objId, repeats);
+    if (useful) return { reward: 0.12, penalty: 0, repeats };
+    if (repeats <= MEASUREMENT_SPAM_POLICY.FREE_REPEATS) return { reward: MEASUREMENT_SPAM_POLICY.EARLY_REWARD, penalty: 0, repeats };
+    const penalty = Math.min(MEASUREMENT_SPAM_POLICY.MAX_PENALTY, (repeats - MEASUREMENT_SPAM_POLICY.FREE_REPEATS) * MEASUREMENT_SPAM_POLICY.PENALTY_STEP);
+    return { reward: 0, penalty, repeats };
   }
 
   private controllerTargetFor(held: WorldObject): { metric: 'surface_planarity' | 'microstructure_order' | 'impurity_level'; target: number } {
@@ -287,65 +435,152 @@ export class LiveModeEngine {
       const grindInput = buildModelInput(this.world, this.perception, 'GRIND', held, nearby);
       candidates.push({ verb: 'GRIND', objId: nearby.id, modelInput: grindInput, predicted: this.worldModel.predict(grindInput) });
     }
-    if (held.latentPrecision.surface_planarity < 0.65 || held.latentPrecision.microstructure_order < 0.65) {
+    if (
+      this.regime === 'manufacture' ||
+      held.latentPrecision.surface_planarity < CONTROL_THRESHOLDS.MIN_PLANARITY_FOR_CONTROL ||
+      held.latentPrecision.microstructure_order < CONTROL_THRESHOLDS.MIN_MICROSTRUCTURE_FOR_CONTROL
+    ) {
       candidates.push({ verb: 'CONTROL', score: 0.55 + (1 - held.latentPrecision.surface_planarity) * 0.2 });
     }
-    if (!held.anchored && held.constituents && held.constituents.length > 1 && held.integrity > 0.6) {
-      candidates.push({ verb: 'ANCHOR', score: 0.35 });
+    if (!held.anchored && held.integrity > 0.2 && this.regime !== 'explore') {
+      const anchorScore = this.regime === 'manufacture' ? 0.72 : held.constituents && held.constituents.length > 1 ? 0.35 : 0.18;
+      candidates.push({ verb: 'ANCHOR', score: anchorScore });
     }
     return candidates;
   }
 
-  private applyCandidate(chosen: CandidateAction): { outcome?: InteractionOutcome; measurement?: MeasurementResult; controllerAchieved?: number; controllerTarget?: { metric: string; target: number } } {
+  private applyCandidate(chosen: CandidateAction): {
+    outcome?: InteractionOutcome;
+    measurement?: MeasurementResult;
+    controllerAchieved?: number;
+    controllerTarget?: { metric: string; target: number };
+    transformedObjectIds: number[];
+    controllerOutcomeDelta?: number;
+  } {
+    const transformedObjectIds: number[] = [];
     if (chosen.verb === 'PICK_UP' && chosen.objId) this.world.apply({ type: 'PICK_UP', objId: chosen.objId });
-    if (chosen.verb === 'BIND_TO' && chosen.objId) this.world.apply({ type: 'BIND_TO', objId: chosen.objId });
-    if (chosen.verb === 'GRIND' && chosen.objId) this.world.apply({ type: 'GRIND', abrasiveId: chosen.objId, intensity: chosen.intensity });
-    if (chosen.verb === 'STRIKE_WITH' && chosen.targetId) this.world.apply({ type: 'STRIKE_WITH', targetId: chosen.targetId });
-    if (chosen.verb === 'HEAT') this.world.apply({ type: 'HEAT', intensity: chosen.intensity ?? 0.5 });
-    if (chosen.verb === 'SOAK') this.world.apply({ type: 'SOAK', intensity: chosen.intensity ?? 0.5 });
-    if (chosen.verb === 'COOL') this.world.apply({ type: 'COOL', intensity: chosen.intensity ?? 0.5 });
-    if (chosen.verb === 'ANCHOR') this.world.apply({ type: 'ANCHOR' });
+    if (chosen.verb === 'BIND_TO' && chosen.objId) {
+      const heldBefore = this.world.agent.heldObjectId;
+      this.world.apply({ type: 'BIND_TO', objId: chosen.objId });
+      if (heldBefore) transformedObjectIds.push(heldBefore, chosen.objId, this.world.agent.heldObjectId ?? 0);
+    }
+    if (chosen.verb === 'GRIND' && chosen.objId) {
+      this.world.apply({ type: 'GRIND', abrasiveId: chosen.objId, intensity: chosen.intensity });
+      if (this.world.agent.heldObjectId) transformedObjectIds.push(this.world.agent.heldObjectId);
+    }
+    if (chosen.verb === 'STRIKE_WITH' && chosen.targetId) {
+      this.world.apply({ type: 'STRIKE_WITH', targetId: chosen.targetId });
+      transformedObjectIds.push(chosen.targetId);
+    }
+    if (chosen.verb === 'HEAT') {
+      this.world.apply({ type: 'HEAT', intensity: chosen.intensity ?? 0.5 });
+      if (this.world.agent.heldObjectId) transformedObjectIds.push(this.world.agent.heldObjectId);
+    }
+    if (chosen.verb === 'SOAK') {
+      this.world.apply({ type: 'SOAK', intensity: chosen.intensity ?? 0.5 });
+      if (this.world.agent.heldObjectId) transformedObjectIds.push(this.world.agent.heldObjectId);
+    }
+    if (chosen.verb === 'COOL') {
+      this.world.apply({ type: 'COOL', intensity: chosen.intensity ?? 0.5 });
+      if (this.world.agent.heldObjectId) transformedObjectIds.push(this.world.agent.heldObjectId);
+    }
+    if (chosen.verb === 'ANCHOR') {
+      const heldBefore = this.world.agent.heldObjectId;
+      this.world.apply({ type: 'ANCHOR' });
+      if (heldBefore) transformedObjectIds.push(heldBefore);
+    }
     if (chosen.verb === 'CONTROL' && this.world.agent.heldObjectId) {
       const held = this.world.objects.get(this.world.agent.heldObjectId);
       if (held) {
         const target = this.controllerTargetFor(held);
+        const before =
+          target.metric === 'surface_planarity'
+            ? held.latentPrecision.surface_planarity
+            : target.metric === 'microstructure_order'
+              ? held.latentPrecision.microstructure_order
+              : held.latentPrecision.impurity_level;
         const step = this.controller.step(this.world, held, target);
+        const after =
+          target.metric === 'surface_planarity'
+            ? step.achieved
+            : target.metric === 'microstructure_order'
+              ? step.achieved
+              : 1 - step.achieved;
         return {
           outcome: this.world.lastInteractionOutcome,
           measurement: step.measured,
           controllerAchieved: step.achieved,
           controllerTarget: target,
+          transformedObjectIds: [held.id],
+          controllerOutcomeDelta: after - before,
         };
       }
     }
-    return { outcome: this.world.lastInteractionOutcome };
+    return { outcome: this.world.lastInteractionOutcome, transformedObjectIds };
   }
 
   private ensureEcologyPressure(): void {
-    if (this.world.rng.float() < 0.01) this.world.spawnTarget();
+    this.world.regrowBiomass(0.0035);
+    if (this.world.rng.float() < 0.01) {
+      this.world.spawnTarget();
+      this.spawnedTargets += 1;
+    }
   }
 
   tickOnce(): LiveTickResult {
     this.tick += 1;
     this.simTimeSeconds = this.tick / Math.max(1, this.config.ticksPerSecond);
     this.ensureEcologyPressure();
+    this.maybeUpdateRegime();
     const memoryIndex = this.config.deterministic ? this.tick % this.memories.length : this.world.rng.int(0, this.memories.length);
     const memory = this.memories[memoryIndex];
-    memory.energy = Math.min(1, memory.energy + 0.015);
+    const objectCountBeforeAction = this.world.objects.size;
+    memory.energy = Math.min(1, memory.energy + 0.018);
+    this.world.agent.energy = memory.energy;
     const held = this.world.agent.heldObjectId ? this.world.objects.get(this.world.agent.heldObjectId) : undefined;
     let chosen: CandidateAction = { verb: 'REST', score: 0 };
-    if (memory.energy >= 0.08) {
+    if (memory.energy >= 0.05) {
       const candidates = this.createCandidates(held);
-      const selected = chooseCandidate(candidates, this.worldModel, this.noveltyWindow);
+      const selected = chooseCandidate(candidates, this.worldModel, this.noveltyWindow, this.regime);
       if (selected) chosen = selected;
+      if (this.regime === 'manufacture' && this.world.stations.size === 0) {
+        const anchor = candidates.find((entry) => entry.verb === 'ANCHOR');
+        if (anchor && this.tick % MANUFACTURE_FORCE_INTERVALS.ANCHOR_TICKS === 0) chosen = anchor;
+      }
+      if (this.regime === 'manufacture' && held && this.world.stations.size > 0) {
+        const control = candidates.find((entry) => entry.verb === 'CONTROL');
+        if (control && (this.tick % MANUFACTURE_FORCE_INTERVALS.CONTROL_TICKS === 0 || selected?.verb === 'STRIKE_WITH')) chosen = control;
+      }
     }
-    const applyResult = chosen.verb === 'REST' ? {} : this.applyCandidate(chosen);
+    const cost = actionCost(chosen.verb);
+    if (chosen.verb !== 'REST' && memory.energy < cost) chosen = { verb: 'REST', score: 0 };
+    const applyResult = chosen.verb === 'REST' ? { transformedObjectIds: [] } : this.applyCandidate(chosen);
     const outcome = applyResult.outcome;
-    if (chosen.verb !== 'REST') memory.energy = Math.max(0, memory.energy - 0.07);
+    if (chosen.verb !== 'REST') {
+      memory.energy = Math.max(0, memory.energy - cost);
+      this.totalActions += 1;
+    } else {
+      this.idleTicks += 1;
+    }
+    this.world.agent.energy = memory.energy;
+    const transformedObjectIds = applyResult.transformedObjectIds.filter((id) => id > 0);
+    for (const id of transformedObjectIds) {
+      this.objectLastTransformedTick.set(id, this.tick);
+      this.measurementRepeatCount.set(id, 0);
+    }
     if (chosen.verb === 'BIND_TO') this.compositeCount += 1;
+    if (chosen.verb === 'CONTROL') {
+      this.controllerSteps += 1;
+      this.lastControllerTarget = applyResult.controllerTarget?.metric;
+      this.lastControllerOutcomeDelta = applyResult.controllerOutcomeDelta;
+    }
     if (chosen.verb === 'STRIKE_WITH' && outcome) {
       this.recentStrikeDamage.push(outcome.damage);
       while (this.recentStrikeDamage.length > 10) this.recentStrikeDamage.shift();
+      if (this.world.lastInteractionOutcome?.targetId && !this.world.objects.has(this.world.lastInteractionOutcome.targetId)) {
+        this.destroyedTargets += 1;
+        this.spawnedTargets += 1;
+      }
     }
     const repeatabilityVariance = (() => {
       if (this.recentStrikeDamage.length < 2) return 0;
@@ -361,8 +596,12 @@ export class LiveModeEngine {
         3
       : 0;
     this.precisionScore = precisionNow;
+    this.processChain.push(chosen.verb);
+    while (this.processChain.length > 12) this.processChain.shift();
     const effectivenessBase = outcome ? outcome.damage + outcome.fragments * 0.4 - outcome.toolWear * 0.3 : 0;
-    const effectiveness = effectivenessBase + this.repeatabilityScore * 0.2 + this.precisionScore * 0.25;
+    const woodWeight = this.regime === 'manufacture' ? 0.15 : this.regime === 'exploit' ? 0.45 : 0.8;
+    const qualityWeight = this.regime === 'manufacture' ? 0.65 : 0.35;
+    let effectiveness = effectivenessBase * woodWeight + this.repeatabilityScore * qualityWeight * 0.3 + this.precisionScore * qualityWeight * 0.35;
     let predictionError = 0;
     if (chosen.modelInput && outcome) {
       const predicted = chosen.predicted ?? this.worldModel.predict(chosen.modelInput);
@@ -386,13 +625,31 @@ export class LiveModeEngine {
         reward: effectiveness,
       });
     }
+    this.recentPredictionErrors.push(this.worldModel.meanPredictionError());
+    while (this.recentPredictionErrors.length > 1024) this.recentPredictionErrors.shift();
     const heldAfter = this.world.agent.heldObjectId ? this.world.objects.get(this.world.agent.heldObjectId) : undefined;
     const measurements = heldAfter ? this.world.measureObject(heldAfter.id, heldAfter.id) : [];
+    let measurementUseful = false;
+    if (heldAfter && measurements.length) {
+      this.measurementTotal += 1;
+      const lastMeasurementTick = this.objectLastMeasuredTick.get(heldAfter.id) ?? -1;
+      const transformedSinceLast = (this.objectLastTransformedTick.get(heldAfter.id) ?? -1) > lastMeasurementTick;
+      measurementUseful = Boolean(applyResult.controllerTarget) || transformedSinceLast || this.processChainLength() >= 3;
+      const measurementReward = this.measurementRewardFor(heldAfter.id, measurementUseful);
+      effectiveness += measurementReward.reward;
+      this.measurementSpamPenalty = measurementReward.penalty;
+      effectiveness = Math.max(-0.2, effectiveness - measurementReward.penalty);
+      if (measurementUseful) this.measurementUsefulCount += 1;
+      this.objectLastMeasuredTick.set(heldAfter.id, this.tick);
+    } else {
+      this.measurementSpamPenalty = 0;
+    }
     const stationQuality =
       heldAfter?.id !== undefined
         ? this.world.stations.get(heldAfter.id)?.quality ?? 0
         : [...this.world.stations.values()].reduce((best, station) => Math.max(best, station.quality), 0);
     this.ingestMemory(memory, chosen.verb, effectiveness, heldAfter);
+    if (this.world.objects.size < objectCountBeforeAction) this.despawnedObjects += objectCountBeforeAction - this.world.objects.size;
     const replaySignature = `${this.tick}:${chosen.verb}:${outcome?.action ?? 'none'}:${(outcome?.damage ?? 0).toFixed(4)}`;
     const objects = [outcome?.toolId ?? 0, outcome?.targetId ?? 0].filter((id) => id > 0);
     this.pushFrame({
@@ -417,18 +674,32 @@ export class LiveModeEngine {
           controllerTarget: applyResult.controllerTarget?.target,
           controllerAchieved: applyResult.controllerAchieved,
           processChainAction: chosen.verb,
+          processChainLength: this.processChainLength(),
+          controllerSteps: this.controllerSteps,
+          stations: this.world.stations.size,
+          measurementUseful,
         },
         undefined,
       );
     const elapsedMinutes = Math.max(1 / 60, this.simTimeSeconds / 60);
+    const woodPerMinute = this.world.woodGained / elapsedMinutes;
+    this.recentWoodRates.push(woodPerMinute);
+    while (this.recentWoodRates.length > 1024) this.recentWoodRates.shift();
+    const novelPerMinute = this.embedding.novelInteractionCount() / elapsedMinutes;
+    this.recentNoveltyRates.push(novelPerMinute);
+    while (this.recentNoveltyRates.length > 1024) this.recentNoveltyRates.shift();
+    const biomassStats = this.world.biomassStats();
+    const targetYieldStats = this.world.targetYieldStats();
+    const avgEnergy = this.memories.reduce((sum, entry) => sum + entry.energy, 0) / Math.max(1, this.memories.length);
+    const measurementUsefulRate = this.measurementUsefulCount / Math.max(1, this.measurementTotal);
     return {
       tick: this.tick,
       simTimeSeconds: this.simTimeSeconds,
       activeAgentId: memory.id,
       action: chosen.verb,
       predictionErrorMean: this.worldModel.meanPredictionError(),
-      woodPerMinute: this.world.woodGained / elapsedMinutes,
-      novelInteractionsPerMinute: this.embedding.novelInteractionCount() / elapsedMinutes,
+      woodPerMinute,
+      novelInteractionsPerMinute: novelPerMinute,
       compositeDiscoveryRate: this.compositeCount / Math.max(1, this.tick),
       embeddingClusters: this.embedding.clusterCount(),
       repeatabilityScore: this.repeatabilityScore,
@@ -442,6 +713,29 @@ export class LiveModeEngine {
         : undefined,
       measurements,
       stationQuality,
+      regime: this.regime,
+      timeInRegime: Math.max(0, this.simTimeSeconds - this.regimeSinceSeconds),
+      regimeChangeReason: this.lastRegimeChangeReason || undefined,
+      biomassAvg: biomassStats.avg,
+      biomassMin: biomassStats.min,
+      avgTargetYield: targetYieldStats.avgTargetYield,
+      targetsAlive: targetYieldStats.targetsAlive,
+      spawnedPerMin: this.spawnedTargets / elapsedMinutes,
+      destroyedPerMin: this.destroyedTargets / elapsedMinutes,
+      objectsTotal: this.world.objects.size,
+      fragmentsTotal: [...this.world.objects.values()].filter((entry) => (entry.constituents?.length ?? 1) <= 1 && entry.debugFamily === 'fragment').length,
+      despawnedPerMin: this.despawnedObjects / elapsedMinutes,
+      measurementUsefulRate,
+      measurementUseful,
+      measurementTotal: this.measurementTotal,
+      measurementSpamPenalty: this.measurementSpamPenalty,
+      avgEnergy,
+      idleFraction: this.idleTicks / Math.max(1, this.tick),
+      actionsPerMin: this.totalActions / elapsedMinutes,
+      controllerStepsPerMin: this.controllerSteps / elapsedMinutes,
+      lastControllerTarget: this.lastControllerTarget,
+      lastControllerOutcomeDelta: this.lastControllerOutcomeDelta,
+      embeddingsInWindow: this.embedding.entries().length,
       milestones: milestoneEvents,
     };
   }
@@ -498,6 +792,15 @@ export class LiveModeEngine {
     return true;
   }
 
+  measurementSpamSeries(objectId: number, repeats: number): number[] {
+    const series: number[] = [];
+    for (let i = 0; i < repeats; i++) {
+      const result = this.measurementRewardFor(objectId, false);
+      series.push(result.reward - result.penalty);
+    }
+    return series;
+  }
+
   createSnapshot(): LiveSnapshot {
     const elapsedMinutes = Math.max(1 / 60, this.simTimeSeconds / 60);
     return {
@@ -529,6 +832,8 @@ export class LiveModeEngine {
         repeatabilityScore: this.repeatabilityScore,
         precisionScore: this.precisionScore,
         stationCount: this.world.stations.size,
+        regime: this.regime,
+        timeInRegime: Math.max(0, this.simTimeSeconds - this.regimeSinceSeconds),
       },
       modelState: {
         worldModel: this.worldModel.snapshot(),

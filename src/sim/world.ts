@@ -22,6 +22,7 @@ export interface AgentState {
   id: number;
   pos: { x: number; y: number };
   heldObjectId?: ObjID;
+  energy: number;
 }
 
 interface StrikeArc {
@@ -51,6 +52,7 @@ export interface PredictionRealityOverlay {
 export class World {
   readonly width = 10;
   readonly height = 10;
+  readonly biomassResolution = 5;
   readonly rng: RNG;
   readonly objects = new Map<ObjID, WorldObject>();
   readonly logs: string[] = [];
@@ -60,14 +62,16 @@ export class World {
   actualStrikeDamage?: number;
   predictionRealityOverlay?: PredictionRealityOverlay;
   lastInteractionOutcome?: InteractionOutcome;
-  readonly agent: AgentState = { id: 1, pos: { x: 5, y: 5 } };
+  readonly agent: AgentState = { id: 1, pos: { x: 5, y: 5 }, energy: 1 };
   nextObjectId = 1;
   woodGained = 0;
   readonly stations = new Map<ObjID, AnchoredStation>();
   readonly lastMeasurements = new Map<ObjID, MeasurementResult[]>();
+  readonly biomass: number[][];
 
   constructor(seed: number) {
     this.rng = new RNG(seed);
+    this.biomass = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 1));
     this.initialize();
   }
 
@@ -86,6 +90,8 @@ export class World {
     this.lastMeasurements.clear();
     this.agent.pos = { x: 5, y: 5 };
     this.agent.heldObjectId = undefined;
+    this.agent.energy = 1;
+    for (const row of this.biomass) row.fill(1);
 
     for (let i = 0; i < 10; i++) {
       const d = materialDistributions[i % materialDistributions.length];
@@ -253,9 +259,11 @@ export class World {
         alpha: Math.min(1, 0.45 + result.damage),
       };
       if (result.fractured) {
+        const localBiomass = this.consumeBiomassAt(target.pos.x, target.pos.y, 0.22);
         for (const fragment of result.fragments) this.objects.set(fragment.id, fragment);
-        this.woodGained += 1;
-        this.logs.unshift(`STRIKE ${tool.id} -> target ${target.id} dmg=${result.damage.toFixed(2)} wood+1`);
+        const woodYield = Math.round(localBiomass * 1000) / 1000;
+        this.woodGained += woodYield;
+        this.logs.unshift(`STRIKE ${tool.id} -> target ${target.id} dmg=${result.damage.toFixed(2)} wood+${woodYield.toFixed(2)}`);
         this.objects.delete(target.id);
         this.spawnTarget();
       } else {
@@ -345,6 +353,49 @@ export class World {
       this.logs.unshift(`ANCHOR ${held.id} q=${station.quality.toFixed(2)}`);
       return;
     }
+  }
+
+  private biomassCellFor(x: number, y: number): { gx: number; gy: number } {
+    return {
+      gx: Math.min(this.biomassResolution - 1, Math.max(0, Math.floor((x / Math.max(0.001, this.width)) * this.biomassResolution))),
+      gy: Math.min(this.biomassResolution - 1, Math.max(0, Math.floor((y / Math.max(0.001, this.height)) * this.biomassResolution))),
+    };
+  }
+
+  biomassAt(x: number, y: number): number {
+    const { gx, gy } = this.biomassCellFor(x, y);
+    return this.biomass[gy]?.[gx] ?? 1;
+  }
+
+  consumeBiomassAt(x: number, y: number, amount: number): number {
+    const { gx, gy } = this.biomassCellFor(x, y);
+    const current = this.biomass[gy]?.[gx] ?? 1;
+    const next = Math.max(0, current - Math.max(0, amount));
+    if (this.biomass[gy]) this.biomass[gy][gx] = next;
+    return next;
+  }
+
+  regrowBiomass(amount: number): void {
+    const rate = Math.max(0, amount);
+    for (let y = 0; y < this.biomassResolution; y++) {
+      for (let x = 0; x < this.biomassResolution; x++) {
+        this.biomass[y][x] = Math.min(1, this.biomass[y][x] + rate);
+      }
+    }
+  }
+
+  biomassStats(): { avg: number; min: number } {
+    const values = this.biomass.flat();
+    const avg = values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+    const min = values.reduce((best, value) => Math.min(best, value), 1);
+    return { avg, min };
+  }
+
+  targetYieldStats(): { targetsAlive: number; avgTargetYield: number } {
+    const targets = [...this.objects.values()].filter((entry) => entry.debugFamily === 'target-visual');
+    const avgTargetYield =
+      targets.reduce((sum, target) => sum + this.biomassAt(target.pos.x, target.pos.y), 0) / Math.max(1, targets.length);
+    return { targetsAlive: targets.length, avgTargetYield };
   }
 
   measureObject(

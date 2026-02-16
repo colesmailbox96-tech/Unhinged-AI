@@ -142,7 +142,7 @@ function fragmentFrom(target: WorldObject, id: ObjID, rng: RNG): WorldObject {
     grip_score: target.grip_score,
     props: mutate(target.props, 0.03, rng),
     integrity: clamp(target.integrity * 0.45),
-    debugFamily: target.debugFamily,
+    debugFamily: 'fragment',
     anchored: false,
     latentPrecision: {
       surface_planarity: clamp(latent.surface_planarity * 0.92 + rng.normal(0, 0.02)),

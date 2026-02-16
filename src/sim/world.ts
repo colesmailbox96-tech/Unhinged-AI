@@ -50,6 +50,8 @@ export interface PredictionRealityOverlay {
 }
 
 export class World {
+  private static readonly MAX_AGENT_STEP_DISTANCE = 0.65;
+  private static readonly MAX_PICKUP_DISTANCE = 2.5;
   readonly width = 10;
   readonly height = 10;
   readonly biomassResolution = 5;
@@ -68,6 +70,8 @@ export class World {
   readonly stations = new Map<ObjID, AnchoredStation>();
   readonly lastMeasurements = new Map<ObjID, MeasurementResult[]>();
   readonly biomass: number[][];
+  worksetDebugIds: ObjID[] = [];
+  worksetDropZone?: { x: number; y: number };
 
   constructor(seed: number) {
     this.rng = new RNG(seed);
@@ -137,6 +141,21 @@ export class World {
     });
   }
 
+  spawnLooseObject(): ObjID {
+    const d = materialDistributions[this.rng.int(0, materialDistributions.length)];
+    return this.addObject({
+      pos: { x: this.rng.range(3.6, 6.4), y: this.rng.range(3.6, 6.4) },
+      shapeType: this.sampleShapeType(),
+      radius: this.rng.range(0.1, 0.32),
+      length: this.rng.range(0.2, 1.6),
+      thickness: this.rng.range(0.1, 0.4),
+      center_of_mass_offset: { x: this.rng.normal(0, 0.06), y: this.rng.normal(0, 0.04) },
+      integrity: this.rng.range(0.5, 1),
+      props: sampleProperties(d, this.rng),
+      debugFamily: d.debugFamily,
+    });
+  }
+
   private sampleShapeType(): ShapeType {
     const roll = this.rng.float();
     if (roll < 0.28) return 'sphere';
@@ -197,23 +216,39 @@ export class World {
   apply(action: PrimitiveVerb): void {
     this.lastInteractionOutcome = undefined;
     if (action.type === 'MOVE_TO') {
-      this.agent.pos.x = Math.max(0, Math.min(this.width, action.x));
-      this.agent.pos.y = Math.max(0, Math.min(this.height, action.y));
+      const tx = Math.max(0, Math.min(this.width, action.x));
+      const ty = Math.max(0, Math.min(this.height, action.y));
+      const dx = tx - this.agent.pos.x;
+      const dy = ty - this.agent.pos.y;
+      const dist = Math.hypot(dx, dy);
+      const maxStep = World.MAX_AGENT_STEP_DISTANCE;
+      const scale = dist > maxStep ? maxStep / Math.max(0.0001, dist) : 1;
+      this.agent.pos.x += dx * scale;
+      this.agent.pos.y += dy * scale;
+      if (this.agent.heldObjectId) {
+        const held = this.getObject(this.agent.heldObjectId);
+        if (held) held.pos = { ...this.agent.pos };
+      }
       return;
     }
 
     if (action.type === 'PICK_UP') {
       const obj = this.getObject(action.objId);
       if (!obj) return;
+      if (Math.hypot(obj.pos.x - this.agent.pos.x, obj.pos.y - this.agent.pos.y) > World.MAX_PICKUP_DISTANCE) return;
       this.agent.heldObjectId = obj.id;
       obj.heldBy = this.agent.id;
+      obj.pos = { ...this.agent.pos };
       return;
     }
 
     if (action.type === 'DROP') {
       if (!this.agent.heldObjectId) return;
       const held = this.getObject(this.agent.heldObjectId);
-      if (held) held.heldBy = undefined;
+      if (held) {
+        held.heldBy = undefined;
+        held.pos = { ...this.agent.pos };
+      }
       this.agent.heldObjectId = undefined;
       return;
     }
@@ -415,5 +450,16 @@ export class World {
     ];
     this.lastMeasurements.set(objId, out);
     return out;
+  }
+
+  recomputeStations(): void {
+    for (const stationId of [...this.stations.keys()]) {
+      const anchored = this.objects.get(stationId);
+      if (!anchored || !anchored.anchored) {
+        this.stations.delete(stationId);
+        continue;
+      }
+      this.stations.set(stationId, stationFromAnchoredObject(anchored));
+    }
   }
 }

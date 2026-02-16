@@ -25,3 +25,15 @@ Use **Live Mode** with `N=1` or `N=2`, `Deterministic Live`, and run for at leas
 - Enable **Show true latent state (debug)** to compare inferred vs true latent precision state.
 - Watch controller target/achieved lines as the closed-loop controller drives planarity/order/impurity goals.
 - Use the milestone timeline to confirm first station, CI shrink, controller target hit, and repeated process-chain events.
+
+## Living World + Lab Mode
+
+Manufacture no longer purges the world: ecology keeps regrowing while a small **workset** is selected for lab duty.
+
+- Use **Show workset** to highlight tagged lab objects and their tether to the station drop zone.
+- Use **Pin workset** to freeze refresh/reselection for debugging.
+- Dashboard fields now include duty cycle (`lab/world`), workset size/age/at-station fraction, haul trips, controller state (`idle|selecting_target|tuning|evaluating|converged|blocked`), and active station telemetry.
+
+### Run
+
+- `npm test` runs acceptance checks for world persistence during manufacture, workset stability near station, and controller/manufacturing progress without world collapse.

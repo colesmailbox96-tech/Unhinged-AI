@@ -134,4 +134,54 @@ describe('runner shared API', () => {
     const controlled = avg(seeds.map((seed) => runTrial(seed, true)));
     expect(controlled).toBeGreaterThan(baseline);
   });
+
+  test('living world + lab mode stay active during manufacture window', () => {
+    const engine = new LiveModeEngine({
+      seed: 1777,
+      populationSize: 1,
+      ticksPerSecond: 20,
+      deterministic: true,
+      rollingSeconds: 60,
+    });
+    const totalTicks = 20 * 60 * 10;
+    let targetsAliveSeconds = 0;
+    let manufactureSeconds = 0;
+    let manufactureAtStationSeconds = 0;
+    let maxObjects = 0;
+    let sawControllerSteps = false;
+    let sawManufacturingImprovement = false;
+    let last = engine.tickOnce();
+    for (let i = 0; i < totalTicks; i++) {
+      last = engine.tickOnce();
+      if (i % 5 === 0) {
+        engine.trainChunk({
+          trainEveryMs: 50,
+          batchSize: 8,
+          maxTrainMsPerSecond: 45,
+          stepsPerTick: 2,
+        });
+      }
+      maxObjects = Math.max(maxObjects, last.objectsTotal);
+      if (i % 20 === 0) {
+        if (last.targetsAlive > 0) targetsAliveSeconds += 1;
+        if (last.regime === 'manufacture') {
+          manufactureSeconds += 1;
+          if (last.worksetAtStationFraction >= 0.7) manufactureAtStationSeconds += 1;
+        }
+      }
+      if (last.controllerStepsLast60s > 0) sawControllerSteps = true;
+      if (last.manufacturingImprovements > 0) sawManufacturingImprovement = true;
+      expect(last.worksetSize).toBeGreaterThanOrEqual(3);
+      expect(last.worksetSize).toBeLessThanOrEqual(12);
+    }
+    expect(targetsAliveSeconds / Math.max(1, totalTicks / 20)).toBeGreaterThanOrEqual(0.9);
+    expect(maxObjects).toBeLessThanOrEqual(200);
+    expect(last.purgedNonDebrisPerMin).toBe(0);
+    expect(last.despawnedTargetsPerMin).toBe(0);
+    expect(manufactureSeconds).toBeGreaterThan(0);
+    expect(manufactureAtStationSeconds / Math.max(1, manufactureSeconds)).toBeGreaterThanOrEqual(0.7);
+    expect(sawControllerSteps).toBe(true);
+    expect(sawManufacturingImprovement).toBe(true);
+    expect(last.objectsTotal).toBeGreaterThan(5);
+  }, 30_000);
 });

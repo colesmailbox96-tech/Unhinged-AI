@@ -2,14 +2,22 @@ import { PerceptionHead, type Observation } from '../ai/perception';
 import { ReplayBuffer } from '../ai/replay_buffer';
 import { ToolEmbedding } from '../ai/tool_embedding';
 import { WorldModel, type WorldModelInput, type WorldModelOutcome, type WorldModelPrediction } from '../ai/world_model';
-import { ClosedLoopController } from '../ai/controller';
+import { ClosedLoopController, type ControllerRuntimeState } from '../ai/controller';
 import type { InteractionOutcome } from '../sim/world';
 import { World } from '../sim/world';
 import type { ObjID, WorldObject } from '../sim/object_model';
 import { MilestoneTracker, type MilestoneEvent } from '../sim/milestones';
 import type { MeasurementResult } from '../sim/metrology';
+import {
+  avgDistanceToStation,
+  createEmptyWorkset,
+  DEFAULT_WORKSET_CONFIG,
+  refreshWorkset,
+  worksetAtStationFraction,
+  type WorksetState,
+} from '../sim/workset';
 
-type LiveVerb = 'PICK_UP' | 'BIND_TO' | 'STRIKE_WITH' | 'GRIND' | 'HEAT' | 'SOAK' | 'COOL' | 'ANCHOR' | 'CONTROL' | 'REST';
+type LiveVerb = 'MOVE_TO' | 'PICK_UP' | 'DROP' | 'BIND_TO' | 'STRIKE_WITH' | 'GRIND' | 'HEAT' | 'SOAK' | 'COOL' | 'ANCHOR' | 'CONTROL' | 'REST';
 export type LiveRegime = 'explore' | 'exploit' | 'manufacture';
 
 interface CandidateAction {
@@ -88,9 +96,31 @@ export interface LiveTickResult {
   idleFraction: number;
   actionsPerMin: number;
   controllerStepsPerMin: number;
+  controllerState: ControllerRuntimeState;
+  controllerStepsLast60s: number;
+  controllerEvaluationsLast60s: number;
   lastControllerTarget?: string;
   lastControllerOutcomeDelta?: number;
   embeddingsInWindow: number;
+  dutyCycleLab: number;
+  dutyCycleWorld: number;
+  worksetSize: number;
+  worksetIds: number[];
+  worksetHomeStationId?: number;
+  worksetAgeSec: number;
+  worksetAtStationFraction: number;
+  haulTripsPerMin: number;
+  avgDistanceToStation: number;
+  purgedNonDebrisPerMin: number;
+  despawnedTargetsPerMin: number;
+  spawnSuccessPerMin: number;
+  despawnByReason: Record<string, number>;
+  activeStationId?: number;
+  activeStationQuality: number;
+  distanceToActiveStation?: number;
+  stationQualities: Array<{ id: number; quality: number }>;
+  dutyMode: 'lab' | 'world';
+  manufacturingImprovements: number;
   milestones: MilestoneEvent[];
 }
 
@@ -163,8 +193,17 @@ const CONTROL_THRESHOLDS = {
 } as const;
 
 const MANUFACTURE_FORCE_INTERVALS = {
-  ANCHOR_TICKS: 5,
+  ANCHOR_TICKS: 1,
   CONTROL_TICKS: 3,
+} as const;
+
+const MANUFACTURE_DUTY = {
+  LAB: 0.7,
+  WORLD: 0.3,
+} as const;
+
+const ECOLOGY_LIMITS = {
+  MAX_OBJECTS: 120,
 } as const;
 
 const MEASUREMENT_SPAM_POLICY = {
@@ -175,6 +214,7 @@ const MEASUREMENT_SPAM_POLICY = {
 } as const;
 
 const ACTION_ENERGY_COST: Partial<Record<LiveVerb, number>> = {
+  MOVE_TO: 0.02,
   STRIKE_WITH: 0.16,
   GRIND: 0.1,
   BIND_TO: 0.09,
@@ -184,6 +224,7 @@ const ACTION_ENERGY_COST: Partial<Record<LiveVerb, number>> = {
   ANCHOR: 0.09,
   CONTROL: 0.11,
   PICK_UP: 0.04,
+  DROP: 0.02,
 };
 
 function actionCost(action: LiveVerb): number {
@@ -298,9 +339,15 @@ export class LiveModeEngine {
   spawnedTargets = 0;
   destroyedTargets = 0;
   despawnedObjects = 0;
+  purgedNonDebris = 0;
+  despawnedTargets = 0;
+  spawnSuccess = 0;
   totalActions = 0;
   idleTicks = 0;
   controllerSteps = 0;
+  controllerState: ControllerRuntimeState = 'idle';
+  manufacturingImprovements = 0;
+  haulTrips = 0;
   measurementTotal = 0;
   measurementUsefulCount = 0;
   measurementSpamPenalty = 0;
@@ -315,6 +362,10 @@ export class LiveModeEngine {
   private readonly objectLastMeasuredTick = new Map<number, number>();
   private readonly measurementRepeatCount = new Map<number, number>();
   private readonly noveltyWindow = new Map<string, number>();
+  private readonly controllerStepTimestamps: number[] = [];
+  private readonly controllerEvaluationTimestamps: number[] = [];
+  private readonly despawnByReasonCounts: Record<string, number> = {};
+  private workset: WorksetState = createEmptyWorkset();
   private readonly config: LiveModeConfig;
 
   constructor(config: LiveModeConfig) {
@@ -334,6 +385,7 @@ export class LiveModeEngine {
       goodLocations: [],
     }));
     this.spawnedTargets = 1;
+    this.spawnSuccess = 1;
   }
 
   private pushFrame(frame: SegmentFrame): void {
@@ -415,21 +467,93 @@ export class LiveModeEngine {
     return { metric: 'impurity_level', target: 0.25 };
   }
 
+  setPinWorkset(pinned: boolean): void {
+    this.workset = { ...this.workset, pinned };
+  }
+
+  private isLabDutyTick(): boolean {
+    const cycle = 10;
+    const labTicks = Math.round(MANUFACTURE_DUTY.LAB * cycle);
+    return this.tick % cycle < labTicks;
+  }
+
+  private trackDespawn(reason: string, obj: WorldObject): void {
+    this.despawnByReasonCounts[reason] = (this.despawnByReasonCounts[reason] ?? 0) + 1;
+    if (obj.debugFamily === 'target-visual') this.despawnedTargets += 1;
+  }
+
+  private cleanupDebrisOnly(): void {
+    const over = this.world.objects.size - ECOLOGY_LIMITS.MAX_OBJECTS;
+    if (over <= 0) return;
+    const removable = [...this.world.objects.values()]
+      .filter((entry) => entry.debugFamily === 'fragment' || entry.debugFamily === 'dustCandidate')
+      .sort((a, b) => a.integrity - b.integrity);
+    for (const entry of removable.slice(0, over)) {
+      if (this.world.agent.heldObjectId === entry.id || this.workset.ids.includes(entry.id)) continue;
+      this.world.objects.delete(entry.id);
+      this.trackDespawn('debris-cap', entry);
+    }
+  }
+
   private createCandidates(held: WorldObject | undefined): CandidateAction[] {
     const targetId = this.world.getTargetId();
     const target = targetId ? this.world.objects.get(targetId) : undefined;
     const candidates: CandidateAction[] = [];
+    const labDuty = this.regime === 'manufacture' && this.isLabDutyTick();
+    const dropZone = this.workset.dropZone;
+    const worksetObjects = this.workset.ids.map((id) => this.world.objects.get(id)).filter((obj): obj is WorldObject => Boolean(obj));
+    const moveHeldToDropZone =
+      held && dropZone && Math.hypot(held.pos.x - dropZone.x, held.pos.y - dropZone.y) > DEFAULT_WORKSET_CONFIG.stationRadius;
     if (!held) {
+      if (labDuty && dropZone && worksetObjects.length) {
+        const notAtStation = worksetObjects
+          .filter((obj) => Math.hypot(obj.pos.x - dropZone.x, obj.pos.y - dropZone.y) > DEFAULT_WORKSET_CONFIG.stationRadius)
+          .sort(
+            (a, b) =>
+              Math.hypot(a.pos.x - this.world.agent.pos.x, a.pos.y - this.world.agent.pos.y) -
+              Math.hypot(b.pos.x - this.world.agent.pos.x, b.pos.y - this.world.agent.pos.y),
+          );
+        const pickup = notAtStation[0] ?? worksetObjects[0];
+        if (pickup) {
+          const dist = Math.hypot(pickup.pos.x - this.world.agent.pos.x, pickup.pos.y - this.world.agent.pos.y);
+          if (dist <= DEFAULT_WORKSET_CONFIG.stationRadius) {
+            candidates.push({ verb: 'PICK_UP', objId: pickup.id, score: 0.8 });
+            candidates.push({ verb: 'MOVE_TO', score: 0.75, intensity: 1, objId: pickup.id });
+          } else {
+            candidates.push({ verb: 'MOVE_TO', score: 0.75, intensity: 1, objId: pickup.id });
+            candidates.push({ verb: 'PICK_UP', objId: pickup.id, score: 0.7 });
+          }
+          return candidates;
+        }
+      }
       for (const candidate of chooseByPerception(this.world, this.perception).slice(0, 3)) {
         candidates.push({ verb: 'PICK_UP', objId: candidate.id, score: 0.05 });
       }
       return candidates;
     }
+    if (labDuty && dropZone && moveHeldToDropZone) {
+      candidates.push({ verb: 'MOVE_TO', score: 0.9, intensity: 1 });
+      return candidates;
+    }
+    if (labDuty && dropZone && held && Math.hypot(held.pos.x - dropZone.x, held.pos.y - dropZone.y) <= DEFAULT_WORKSET_CONFIG.stationRadius) {
+      const stationFraction = worksetAtStationFraction(this.world, this.workset, DEFAULT_WORKSET_CONFIG.stationRadius);
+      const shouldControl =
+        held.latentPrecision.surface_planarity < CONTROL_THRESHOLDS.MIN_PLANARITY_FOR_CONTROL ||
+        held.latentPrecision.microstructure_order < CONTROL_THRESHOLDS.MIN_MICROSTRUCTURE_FOR_CONTROL;
+      if (stationFraction < 0.7) {
+        candidates.push({ verb: 'DROP', score: 0.84 });
+        if (shouldControl) candidates.push({ verb: 'CONTROL', score: 0.6 });
+      } else {
+        if (shouldControl || this.regime === 'manufacture') candidates.push({ verb: 'CONTROL', score: 0.82 });
+        candidates.push({ verb: 'DROP', score: 0.58 });
+      }
+    }
     if (target && target.id !== held.id) {
       const strikeInput = buildModelInput(this.world, this.perception, 'STRIKE_WITH', held, target);
-      candidates.push({ verb: 'STRIKE_WITH', targetId: target.id, modelInput: strikeInput, predicted: this.worldModel.predict(strikeInput) });
+      if (!labDuty) candidates.push({ verb: 'STRIKE_WITH', targetId: target.id, modelInput: strikeInput, predicted: this.worldModel.predict(strikeInput) });
     }
-    for (const nearby of chooseByPerception(this.world, this.perception, [held.id]).slice(0, 2)) {
+    const nearbyPool = labDuty && worksetObjects.length ? worksetObjects.filter((entry) => entry.id !== held.id) : chooseByPerception(this.world, this.perception, [held.id]).slice(0, 2);
+    for (const nearby of nearbyPool.slice(0, 2)) {
       const bindInput = buildModelInput(this.world, this.perception, 'BIND_TO', held, nearby);
       candidates.push({ verb: 'BIND_TO', objId: nearby.id, modelInput: bindInput, predicted: this.worldModel.predict(bindInput) });
       const grindInput = buildModelInput(this.world, this.perception, 'GRIND', held, nearby);
@@ -442,7 +566,7 @@ export class LiveModeEngine {
     ) {
       candidates.push({ verb: 'CONTROL', score: 0.55 + (1 - held.latentPrecision.surface_planarity) * 0.2 });
     }
-    if (!held.anchored && held.integrity > 0.2 && this.regime !== 'explore') {
+    if (!held.anchored && this.regime !== 'explore') {
       const anchorScore = this.regime === 'manufacture' ? 0.72 : held.constituents && held.constituents.length > 1 ? 0.35 : 0.18;
       candidates.push({ verb: 'ANCHOR', score: anchorScore });
     }
@@ -456,9 +580,25 @@ export class LiveModeEngine {
     controllerTarget?: { metric: string; target: number };
     transformedObjectIds: number[];
     controllerOutcomeDelta?: number;
+    controllerApplied?: boolean;
+    controllerState?: ControllerRuntimeState;
   } {
     const transformedObjectIds: number[] = [];
+    if (chosen.verb === 'MOVE_TO') {
+      const destination =
+        chosen.objId && this.world.objects.has(chosen.objId)
+          ? this.world.objects.get(chosen.objId)?.pos
+          : this.workset.dropZone && this.regime === 'manufacture'
+            ? this.workset.dropZone
+            : undefined;
+      if (destination) this.world.apply({ type: 'MOVE_TO', x: destination.x, y: destination.y });
+    }
     if (chosen.verb === 'PICK_UP' && chosen.objId) this.world.apply({ type: 'PICK_UP', objId: chosen.objId });
+    if (chosen.verb === 'DROP') {
+      const before = this.world.agent.heldObjectId;
+      this.world.apply({ type: 'DROP' });
+      if (before) transformedObjectIds.push(before);
+    }
     if (chosen.verb === 'BIND_TO' && chosen.objId) {
       const heldBefore = this.world.agent.heldObjectId;
       this.world.apply({ type: 'BIND_TO', objId: chosen.objId });
@@ -510,9 +650,11 @@ export class LiveModeEngine {
           outcome: this.world.lastInteractionOutcome,
           measurement: step.measured,
           controllerAchieved: step.achieved,
-          controllerTarget: target,
+          controllerTarget: step.applied ? target : undefined,
           transformedObjectIds: [held.id],
           controllerOutcomeDelta: after - before,
+          controllerApplied: step.applied,
+          controllerState: step.state,
         };
       }
     }
@@ -521,10 +663,18 @@ export class LiveModeEngine {
 
   private ensureEcologyPressure(): void {
     this.world.regrowBiomass(0.0035);
+    if (this.world.objects.size < 18) this.world.spawnLooseObject();
+    if (this.world.targetYieldStats().targetsAlive === 0) {
+      this.world.spawnTarget();
+      this.spawnedTargets += 1;
+      this.spawnSuccess += 1;
+    }
     if (this.world.rng.float() < 0.01) {
       this.world.spawnTarget();
       this.spawnedTargets += 1;
+      this.spawnSuccess += 1;
     }
+    this.cleanupDebrisOnly();
   }
 
   tickOnce(): LiveTickResult {
@@ -532,6 +682,10 @@ export class LiveModeEngine {
     this.simTimeSeconds = this.tick / Math.max(1, this.config.ticksPerSecond);
     this.ensureEcologyPressure();
     this.maybeUpdateRegime();
+    this.world.recomputeStations();
+    this.workset = refreshWorkset(this.world, this.workset, DEFAULT_WORKSET_CONFIG, 1 / Math.max(1, this.config.ticksPerSecond));
+    this.world.worksetDebugIds = [...this.workset.ids];
+    this.world.worksetDropZone = this.workset.dropZone ? { ...this.workset.dropZone } : undefined;
     const memoryIndex = this.config.deterministic ? this.tick % this.memories.length : this.world.rng.int(0, this.memories.length);
     const memory = this.memories[memoryIndex];
     const objectCountBeforeAction = this.world.objects.size;
@@ -539,6 +693,7 @@ export class LiveModeEngine {
     this.world.agent.energy = memory.energy;
     const held = this.world.agent.heldObjectId ? this.world.objects.get(this.world.agent.heldObjectId) : undefined;
     let chosen: CandidateAction = { verb: 'REST', score: 0 };
+    const dutyMode: 'lab' | 'world' = this.regime === 'manufacture' && this.isLabDutyTick() ? 'lab' : 'world';
     if (memory.energy >= 0.05) {
       const candidates = this.createCandidates(held);
       const selected = chooseCandidate(candidates, this.worldModel, this.noveltyWindow, this.regime);
@@ -550,6 +705,10 @@ export class LiveModeEngine {
       if (this.regime === 'manufacture' && held && this.world.stations.size > 0) {
         const control = candidates.find((entry) => entry.verb === 'CONTROL');
         if (control && (this.tick % MANUFACTURE_FORCE_INTERVALS.CONTROL_TICKS === 0 || selected?.verb === 'STRIKE_WITH')) chosen = control;
+      }
+      if (dutyMode === 'world' && this.regime === 'manufacture' && chosen.verb === 'CONTROL') {
+        const worldFallback = candidates.find((entry) => entry.verb === 'STRIKE_WITH' || entry.verb === 'PICK_UP');
+        if (worldFallback) chosen = worldFallback;
       }
     }
     const cost = actionCost(chosen.verb);
@@ -570,16 +729,26 @@ export class LiveModeEngine {
     }
     if (chosen.verb === 'BIND_TO') this.compositeCount += 1;
     if (chosen.verb === 'CONTROL') {
-      this.controllerSteps += 1;
+      this.controllerEvaluationTimestamps.push(this.simTimeSeconds);
+      const stepApplied = Boolean(applyResult.controllerApplied);
+      if (stepApplied) {
+        this.controllerSteps += 1;
+        this.controllerStepTimestamps.push(this.simTimeSeconds);
+      }
       this.lastControllerTarget = applyResult.controllerTarget?.metric;
       this.lastControllerOutcomeDelta = applyResult.controllerOutcomeDelta;
+      if ((applyResult.controllerOutcomeDelta ?? 0) > 0) this.manufacturingImprovements += 1;
     }
+    if (chosen.verb === 'DROP' && this.workset.dropZone) this.haulTrips += 1;
+    this.controllerState = chosen.verb === 'CONTROL' ? (applyResult.controllerState ?? this.controller.currentState()) : 'idle';
+    if (chosen.verb !== 'CONTROL') this.controller.setIdle();
     if (chosen.verb === 'STRIKE_WITH' && outcome) {
       this.recentStrikeDamage.push(outcome.damage);
       while (this.recentStrikeDamage.length > 10) this.recentStrikeDamage.shift();
       if (this.world.lastInteractionOutcome?.targetId && !this.world.objects.has(this.world.lastInteractionOutcome.targetId)) {
         this.destroyedTargets += 1;
         this.spawnedTargets += 1;
+        this.spawnSuccess += 1;
       }
     }
     const repeatabilityVariance = (() => {
@@ -692,6 +861,13 @@ export class LiveModeEngine {
     const targetYieldStats = this.world.targetYieldStats();
     const avgEnergy = this.memories.reduce((sum, entry) => sum + entry.energy, 0) / Math.max(1, this.memories.length);
     const measurementUsefulRate = this.measurementUsefulCount / Math.max(1, this.measurementTotal);
+    while (this.controllerStepTimestamps.length && this.controllerStepTimestamps[0] < this.simTimeSeconds - 60) this.controllerStepTimestamps.shift();
+    while (this.controllerEvaluationTimestamps.length && this.controllerEvaluationTimestamps[0] < this.simTimeSeconds - 60)
+      this.controllerEvaluationTimestamps.shift();
+    const stationEntries = [...this.world.stations.values()].sort((a, b) => b.quality - a.quality);
+    const activeStation = stationEntries[0];
+    const worksetFraction = worksetAtStationFraction(this.world, this.workset, DEFAULT_WORKSET_CONFIG.stationRadius);
+    const avgDist = avgDistanceToStation(this.world, this.workset);
     return {
       tick: this.tick,
       simTimeSeconds: this.simTimeSeconds,
@@ -733,9 +909,33 @@ export class LiveModeEngine {
       idleFraction: this.idleTicks / Math.max(1, this.tick),
       actionsPerMin: this.totalActions / elapsedMinutes,
       controllerStepsPerMin: this.controllerSteps / elapsedMinutes,
+      controllerState: this.controllerState,
+      controllerStepsLast60s: this.controllerStepTimestamps.length,
+      controllerEvaluationsLast60s: this.controllerEvaluationTimestamps.length,
       lastControllerTarget: this.lastControllerTarget,
       lastControllerOutcomeDelta: this.lastControllerOutcomeDelta,
       embeddingsInWindow: this.embedding.entries().length,
+      dutyCycleLab: MANUFACTURE_DUTY.LAB,
+      dutyCycleWorld: MANUFACTURE_DUTY.WORLD,
+      worksetSize: this.workset.ids.length,
+      worksetIds: [...this.workset.ids],
+      worksetHomeStationId: this.workset.homeStationId,
+      worksetAgeSec: this.workset.ageSec,
+      worksetAtStationFraction: worksetFraction,
+      haulTripsPerMin: this.haulTrips / elapsedMinutes,
+      avgDistanceToStation: avgDist,
+      purgedNonDebrisPerMin: this.purgedNonDebris / elapsedMinutes,
+      despawnedTargetsPerMin: this.despawnedTargets / elapsedMinutes,
+      spawnSuccessPerMin: this.spawnSuccess / elapsedMinutes,
+      despawnByReason: { ...this.despawnByReasonCounts },
+      activeStationId: activeStation?.objectId,
+      activeStationQuality: activeStation?.quality ?? 0,
+      distanceToActiveStation: activeStation
+        ? Math.hypot(this.world.agent.pos.x - activeStation.worldPos.x, this.world.agent.pos.y - activeStation.worldPos.y)
+        : undefined,
+      stationQualities: stationEntries.map((station) => ({ id: station.objectId, quality: station.quality })),
+      dutyMode,
+      manufacturingImprovements: this.manufacturingImprovements,
       milestones: milestoneEvents,
     };
   }

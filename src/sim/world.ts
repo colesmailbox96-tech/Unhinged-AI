@@ -3,7 +3,7 @@ import { bindObjects, cool, grind, heat, soak, strike } from './interactions';
 import { fibrousTargetProps, materialDistributions, sampleProperties } from './material_distributions';
 import { fibrousTargetScore } from './properties';
 import { RNG } from './rng';
-import { type MeasurementResult, measureConductivity, measureGeometry, measureHardness, measureMass, measureOptical } from './metrology';
+import { type MeasurementResult, measureConductivity, measureGeometry, measureHardness, measureMass, measureOptical, resetMetrologyState } from './metrology';
 import { anchorObject, stationFromAnchoredObject, type AnchoredStation } from './stations';
 
 export type PrimitiveVerb =
@@ -84,6 +84,7 @@ export class World {
     this.nextObjectId = 1;
     this.stations.clear();
     this.lastMeasurements.clear();
+    resetMetrologyState();
     this.agent.pos = { x: 5, y: 5 };
     this.agent.heldObjectId = undefined;
 

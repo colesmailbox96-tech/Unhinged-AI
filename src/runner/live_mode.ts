@@ -217,6 +217,7 @@ export class LiveModeEngine {
   precisionScore = 0;
   private readonly recentStrikeDamage: number[] = [];
   private readonly noveltyWindow = new Map<string, number>();
+  private readonly baselineSigmaByObject = new Map<number, number>();
   private readonly config: LiveModeConfig;
 
   constructor(config: LiveModeConfig) {
@@ -388,6 +389,13 @@ export class LiveModeEngine {
     }
     const heldAfter = this.world.agent.heldObjectId ? this.world.objects.get(this.world.agent.heldObjectId) : undefined;
     const measurements = heldAfter ? this.world.measureObject(heldAfter.id, heldAfter.id) : [];
+    const measurementSigmaBaseline =
+      heldAfter && measurements[0]
+        ? this.baselineSigmaByObject.get(heldAfter.id) ?? measurements[0].sigma
+        : undefined;
+    if (heldAfter && measurements[0] && !this.baselineSigmaByObject.has(heldAfter.id)) {
+      this.baselineSigmaByObject.set(heldAfter.id, measurements[0].sigma);
+    }
     const stationQuality =
       heldAfter?.id !== undefined
         ? this.world.stations.get(heldAfter.id)?.quality ?? 0
@@ -413,7 +421,7 @@ export class LiveModeEngine {
           effectiveness,
           stationQuality,
           measurementSigma: measurements[0]?.sigma,
-          measurementSigmaBaseline: measurements[0]?.sampleCount ? measurements[0].sigma * Math.sqrt(measurements[0].sampleCount) : undefined,
+          measurementSigmaBaseline,
           controllerTarget: applyResult.controllerTarget?.target,
           controllerAchieved: applyResult.controllerAchieved,
           processChainAction: chosen.verb,

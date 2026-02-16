@@ -185,7 +185,10 @@ export class MilestoneTracker {
       }
     }
 
-    this.processWindow.push(input.processChainAction ?? input.action);
+    const processAction =
+      input.processChainAction ??
+      (['GRIND', 'HEAT', 'SOAK', 'COOL', 'ANCHOR', 'CONTROL', 'BIND_TO'].includes(input.action) ? input.action : undefined);
+    if (processAction) this.processWindow.push(processAction);
     while (this.processWindow.length > 8) this.processWindow.shift();
     if (this.processWindow.length >= 4) {
       const chain = this.processWindow.slice(-4);

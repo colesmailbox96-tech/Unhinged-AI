@@ -23,6 +23,10 @@ interface RunningStats {
 
 const measurementStats = new Map<string, RunningStats>();
 
+export function resetMetrologyState(): void {
+  measurementStats.clear();
+}
+
 function keyFor(kind: MeasurementKind, objId: number, instrumentId?: number): string {
   return `${kind}:${objId}:${instrumentId ?? 0}`;
 }

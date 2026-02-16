@@ -16,10 +16,12 @@ function chooseByPerception(world: World, perception: PerceptionHead, avoid: Obj
   const hidden = world.getNearbyObjectIds().filter((id) => !avoid.includes(id)).map((id) => world.objects.get(id)).filter((obj): obj is WorldObject => Boolean(obj));
 
   return hidden.sort((a, b) => {
-    const pa = perception.predict(perception.observe(a, world.rng));
-    const pb = perception.predict(perception.observe(b, world.rng));
-    const sa = pa.hardness * 0.3 + a.length / 2.2 + a.props.mass * 0.4;
-    const sb = pb.hardness * 0.3 + b.length / 2.2 + b.props.mass * 0.4;
+    const oa = perception.observe(a, world.rng);
+    const ob = perception.observe(b, world.rng);
+    const pa = perception.predict(oa);
+    const pb = perception.predict(ob);
+    const sa = pa.hardness * 0.25 + oa.observed_length * oa.observed_mass_estimate * (1.2 - oa.visual_symmetry) + oa.contact_area_estimate * 0.1;
+    const sb = pb.hardness * 0.25 + ob.observed_length * ob.observed_mass_estimate * (1.2 - ob.visual_symmetry) + ob.contact_area_estimate * 0.1;
     return sb - sa;
   });
 }

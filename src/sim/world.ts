@@ -1,4 +1,4 @@
-import type { ObjID, WorldObject } from './object_model';
+import { deriveGripScore, type ObjID, type ShapeType, type WorldObject } from './object_model';
 import { bindObjects, grind, strike } from './interactions';
 import { fibrousTargetProps, materialDistributions, sampleProperties } from './material_distributions';
 import { fibrousTargetScore } from './properties';
@@ -20,12 +20,21 @@ export interface AgentState {
   heldObjectId?: ObjID;
 }
 
+interface StrikeArc {
+  center: { x: number; y: number };
+  radius: number;
+  start: number;
+  end: number;
+  alpha: number;
+}
+
 export class World {
   readonly width = 10;
   readonly height = 10;
   readonly rng: RNG;
   readonly objects = new Map<ObjID, WorldObject>();
   readonly logs: string[] = [];
+  lastStrikeArc?: StrikeArc;
   readonly agent: AgentState = { id: 1, pos: { x: 5, y: 5 } };
   nextObjectId = 1;
   woodGained = 0;
@@ -39,6 +48,7 @@ export class World {
     this.objects.clear();
     this.logs.length = 0;
     this.woodGained = 0;
+    this.lastStrikeArc = undefined;
     this.nextObjectId = 1;
     this.agent.pos = { x: 5, y: 5 };
     this.agent.heldObjectId = undefined;
@@ -47,8 +57,11 @@ export class World {
       const d = materialDistributions[i % materialDistributions.length];
       this.addObject({
         pos: { x: this.rng.range(3.5, 6.5), y: this.rng.range(3.5, 6.5) },
+        shapeType: this.sampleShapeType(),
         radius: this.rng.range(0.12, 0.34),
         length: this.rng.range(0.2, 2),
+        thickness: this.rng.range(0.12, 0.45),
+        center_of_mass_offset: { x: this.rng.normal(0, 0.08), y: this.rng.normal(0, 0.04) },
         integrity: this.rng.range(0.55, 1),
         props: sampleProperties(d, this.rng),
         debugFamily: d.debugFamily,
@@ -57,8 +70,11 @@ export class World {
 
     this.addObject({
       pos: { x: this.rng.range(4.2, 5.8), y: this.rng.range(4.2, 5.8) },
+      shapeType: 'rod',
       radius: 0.22,
       length: 1.9,
+      thickness: 0.22,
+      center_of_mass_offset: { x: 0.08, y: 0 },
       integrity: 0.94,
       props: sampleProperties(materialDistributions[1], this.rng),
       debugFamily: 'long-fiber',
@@ -70,17 +86,33 @@ export class World {
   spawnTarget(): ObjID {
     return this.addObject({
       pos: { x: this.rng.range(4.4, 5.6), y: this.rng.range(4.4, 5.6) },
+      shapeType: 'plate',
       radius: 0.42,
       length: this.rng.range(1.2, 1.8),
+      thickness: this.rng.range(0.3, 0.55),
+      center_of_mass_offset: { x: this.rng.normal(0, 0.04), y: this.rng.normal(0, 0.04) },
       integrity: 1,
       props: fibrousTargetProps(this.rng),
       debugFamily: 'target-visual',
     });
   }
 
-  private addObject(input: Omit<WorldObject, 'id' | 'vel'>): ObjID {
+  private sampleShapeType(): ShapeType {
+    const roll = this.rng.float();
+    if (roll < 0.28) return 'sphere';
+    if (roll < 0.62) return 'rod';
+    if (roll < 0.82) return 'shard';
+    return 'plate';
+  }
+
+  private addObject(input: Omit<WorldObject, 'id' | 'vel' | 'grip_score'>): ObjID {
     const id = this.nextObjectId++;
-    this.objects.set(id, { ...input, id, vel: { x: 0, y: 0 } });
+    this.objects.set(id, {
+      ...input,
+      id,
+      vel: { x: 0, y: 0 },
+      grip_score: deriveGripScore(input.shapeType, input.length, input.thickness, input.props.roughness),
+    });
     return id;
   }
 
@@ -151,6 +183,14 @@ export class World {
       const target = this.getObject(action.targetId);
       if (!tool || !target || tool.id === target.id) return;
       const result = strike(tool, target, this.rng, () => this.nextObjectId++);
+      const angle = Math.atan2(target.pos.y - tool.pos.y, target.pos.x - tool.pos.x);
+      this.lastStrikeArc = {
+        center: { ...tool.pos },
+        radius: Math.max(0.4, tool.length * 0.5),
+        start: angle - 0.55,
+        end: angle + 0.25,
+        alpha: Math.min(1, 0.45 + result.damage),
+      };
       if (result.fractured) {
         for (const fragment of result.fragments) this.objects.set(fragment.id, fragment);
         this.woodGained += 1;

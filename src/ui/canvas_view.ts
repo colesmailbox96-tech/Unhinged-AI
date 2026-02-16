@@ -221,7 +221,7 @@ export class CanvasView {
       ctx.setLineDash([]);
       ctx.fillStyle = 'rgba(200,150,255,0.7)';
       ctx.font = '9px system-ui';
-      ctx.fillText(`stn q=${station.quality.toFixed(2)}`, stX + 10, stY - 4);
+      ctx.fillText(`station q=${station.quality.toFixed(2)}`, stX + 10, stY - 4);
     }
 
     logEl.textContent = this.world.logs.slice(0, 18).join('\n');

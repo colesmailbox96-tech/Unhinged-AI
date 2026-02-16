@@ -573,6 +573,9 @@ function startEvolution(config: EvolutionPanelConfig): void {
         // Save weights, reset world
         const savedWorldModel = liveEngine.worldModel;
         const savedEmbedding = liveEngine.embedding;
+        // Restore learned weights via snapshot/loadSnapshot
+        const wmSnap = savedWorldModel.snapshot();
+        const embSnap = savedEmbedding.snapshot();
         liveEngine = new LiveModeEngine({
           seed: liveEngine.seed + 1,
           populationSize: 4,
@@ -580,9 +583,8 @@ function startEvolution(config: EvolutionPanelConfig): void {
           deterministic: false,
           rollingSeconds: 60,
         });
-        // Copy learned weights (shallow — they share mutable state)
-        Object.assign(liveEngine.worldModel, savedWorldModel);
-        Object.assign(liveEngine.embedding, savedEmbedding);
+        liveEngine.worldModel.loadSnapshot(wmSnap);
+        liveEngine.embedding.loadSnapshot(embSnap);
         world = liveEngine.world;
         view = new CanvasView(canvas, world, perception);
         evolutionPanel.addMilestone({ time: 0, label: 'rollout reset — new episode' });
@@ -641,9 +643,9 @@ function proveLearning(): void {
     deterministic: true,
     rollingSeconds: 30,
   });
-  // Copy trained model
-  Object.assign(afterEngine.worldModel, beforeEngine.worldModel);
-  Object.assign(afterEngine.embedding, beforeEngine.embedding);
+  // Restore trained model via snapshot/loadSnapshot
+  afterEngine.worldModel.loadSnapshot(beforeEngine.worldModel.snapshot());
+  afterEngine.embedding.loadSnapshot(beforeEngine.embedding.snapshot());
   let lastAfter = afterEngine.tickOnce();
   for (let i = 0; i < 2400; i++) {
     lastAfter = afterEngine.tickOnce();

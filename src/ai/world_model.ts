@@ -139,4 +139,21 @@ export class WorldModel {
       seen: [...this.seen.entries()],
     };
   }
+
+  loadSnapshot(snap: ReturnType<WorldModel['snapshot']>): void {
+    for (let i = 0; i < this.weights.length && i < snap.weights.length; i++) {
+      for (let j = 0; j < this.weights[i].length && j < snap.weights[i].length; j++) {
+        this.weights[i][j] = snap.weights[i][j];
+      }
+    }
+    for (let i = 0; i < this.bias.length && i < snap.bias.length; i++) {
+      this.bias[i] = snap.bias[i];
+    }
+    this.runningPredictionError = snap.meanPredictionError;
+    this.seen.clear();
+    for (const [key, value] of snap.seen) {
+      this.seen.set(key, value);
+    }
+    this.updates = snap.seen.reduce((sum, [, v]) => sum + v, 0);
+  }
 }

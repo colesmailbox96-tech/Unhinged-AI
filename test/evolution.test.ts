@@ -145,7 +145,7 @@ describe('TrainingScheduler', () => {
     scheduler.recordStep(5, 0.5, 0.8, 1);
     scheduler.recordStep(3, 0.4, 0.7, 100);
     const m = scheduler.metrics(100, 50);
-    expect(m.trainingStepsLast60s).toBe(1); // first step at t=1 is older than 60s window
+    expect(m.trainingStepsLast60s).toBe(1); // first step at t=1 is outside the 60s window (before t=40)
     expect(m.trainingStepsTotal).toBe(2);
   });
 });

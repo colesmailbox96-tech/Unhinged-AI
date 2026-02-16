@@ -71,7 +71,12 @@ export class CanvasView {
       const obs = this.perception.observe(selected, this.world.rng);
       const pred = this.perception.predict(obs);
       const trueVec = PROPERTY_KEYS.map((k) => `${k}: ${selected.props[k].toFixed(2)}`).join(', ');
-      selectedEl.innerHTML = `selected: ${selected.id}<br/>true: ${trueVec}<br/>perceived: mass=${obs.massish.toFixed(2)} rough=${obs.roughnessish.toFixed(2)} length=${obs.lengthish.toFixed(2)}<br/>pred hidden: hard=${pred.hardness.toFixed(2)} brit=${pred.brittleness.toFixed(2)} sharp=${pred.sharpness.toFixed(2)} ±${pred.uncertainty.toFixed(2)}`;
+      selectedEl.innerHTML = [
+        `selected: ${selected.id}`,
+        `true: ${trueVec}`,
+        `perceived: mass=${obs.massish.toFixed(2)} rough=${obs.roughnessish.toFixed(2)} length=${obs.lengthish.toFixed(2)}`,
+        `pred hidden: hard=${pred.hardness.toFixed(2)} brit=${pred.brittleness.toFixed(2)} sharp=${pred.sharpness.toFixed(2)} ±${pred.uncertainty.toFixed(2)}`,
+      ].join('<br/>');
     } else {
       selectedEl.textContent = 'selected: none';
     }

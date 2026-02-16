@@ -40,6 +40,11 @@ function obj(id: number, props: PropertyVector): WorldObject {
   };
 }
 
+function createIdGenerator(startId: number): () => number {
+  let id = startId;
+  return () => id++;
+}
+
 describe('guardrail keywords', () => {
   test('forbidden recipe/type keywords are absent', () => {
     const collect = (dir: string): string[] =>
@@ -64,8 +69,8 @@ describe('property-only outcomes', () => {
     const targetSoft = obj(2, baseProps({ hardness: 0.2 }));
     const targetHard = obj(3, baseProps({ hardness: 0.85 }));
 
-    const soft = strike({ ...tool }, { ...targetSoft }, rng, (() => { let i = 100; return () => i++; })()).damage;
-    const hard = strike({ ...tool }, { ...targetHard }, rng, (() => { let i = 200; return () => i++; })()).damage;
+    const soft = strike({ ...tool }, { ...targetSoft }, rng, createIdGenerator(100)).damage;
+    const hard = strike({ ...tool }, { ...targetHard }, rng, createIdGenerator(200)).damage;
 
     expect(soft).toBeGreaterThan(hard);
     expect(soft - hard).toBeGreaterThan(0.1);

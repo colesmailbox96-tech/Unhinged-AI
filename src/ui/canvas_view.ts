@@ -124,14 +124,17 @@ export class CanvasView {
       }
     }
 
-    if (this.world.predictedStrikeDamage !== undefined && this.world.actualStrikeDamage !== undefined) {
+    if (this.world.predictionRealityOverlay) {
+      const overlay = this.world.predictionRealityOverlay;
       ctx.fillStyle = '#d8fbff';
       ctx.font = '12px monospace';
-      ctx.fillText(
-        `pred damage ${this.world.predictedStrikeDamage.toFixed(2)} | actual ${this.world.actualStrikeDamage.toFixed(2)}`,
-        10,
-        18,
-      );
+      ctx.fillText(`pred dmg ${overlay.predicted.damage.toFixed(2)} wear ${overlay.predicted.toolWear.toFixed(2)} frags ${overlay.predicted.fragments.toFixed(2)}`, 10, 18);
+      ctx.fillText(`real dmg ${overlay.actual.damage.toFixed(2)} wear ${overlay.actual.toolWear.toFixed(2)} frags ${overlay.actual.fragments.toFixed(2)}`, 10, 34);
+      ctx.fillText(`|error| dmg ${overlay.error.damage.toFixed(2)} wear ${overlay.error.toolWear.toFixed(2)} frags ${overlay.error.fragments.toFixed(2)}`, 10, 50);
+    } else if (this.world.predictedStrikeDamage !== undefined && this.world.actualStrikeDamage !== undefined) {
+      ctx.fillStyle = '#d8fbff';
+      ctx.font = '12px monospace';
+      ctx.fillText(`pred damage ${this.world.predictedStrikeDamage.toFixed(2)} | actual ${this.world.actualStrikeDamage.toFixed(2)}`, 10, 18);
     }
 
     const selected = this.selectedId ? this.world.objects.get(this.selectedId) : undefined;

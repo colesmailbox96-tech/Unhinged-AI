@@ -63,4 +63,8 @@ export class ToolEmbedding {
   novelInteractionCount(): number {
     return this.interactionBins.size;
   }
+
+  entries(): Array<{ toolId: number; vector: [number, number, number, number] }> {
+    return [...this.vectors.entries()].map(([toolId, vector]) => ({ toolId, vector: [...vector] as [number, number, number, number] }));
+  }
 }

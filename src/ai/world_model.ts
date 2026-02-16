@@ -25,7 +25,7 @@ export interface WorldModelPrediction {
   expected_property_changes: number;
 }
 
-export interface WorldModelOutcome extends WorldModelPrediction {}
+export type WorldModelOutcome = WorldModelPrediction;
 
 function actionOneHot(action: ModelActionVerb): [number, number, number] {
   if (action === 'STRIKE_WITH') return [1, 0, 0];
@@ -39,6 +39,7 @@ export class WorldModel {
   private readonly seen = new Map<string, number>();
   private runningPredictionError = 0;
   private updates = 0;
+  private frozen = false;
 
   constructor() {
     const featureSize = 15;
@@ -92,6 +93,10 @@ export class WorldModel {
     return 1 / Math.sqrt(seenCount + 1);
   }
 
+  setFrozen(frozen: boolean): void {
+    this.frozen = frozen;
+  }
+
   update(input: WorldModelInput, actual: WorldModelOutcome, lr = 0.12): number {
     const x = this.featurize(input);
     const pred = this.predict(input);
@@ -101,14 +106,17 @@ export class WorldModel {
     const predictionError = absErrors.reduce((a, b) => a + b, 0) / absErrors.length;
     const scaledLr = lr * (0.4 + this.novelty(input) * 0.6);
 
-    for (let i = 0; i < this.weights.length; i++) {
-      const diff = target[i] - predVec[i];
-      for (let j = 0; j < x.length; j++) this.weights[i][j] += scaledLr * diff * x[j];
-      this.bias[i] += scaledLr * diff;
+    if (!this.frozen) {
+      for (let i = 0; i < this.weights.length; i++) {
+        const diff = target[i] - predVec[i];
+        for (let j = 0; j < x.length; j++) this.weights[i][j] += scaledLr * diff * x[j];
+        this.bias[i] += scaledLr * diff;
+      }
+
+      const key = this.keyOf(input);
+      this.seen.set(key, (this.seen.get(key) ?? 0) + 1);
     }
 
-    const key = this.keyOf(input);
-    this.seen.set(key, (this.seen.get(key) ?? 0) + 1);
     this.updates += 1;
     this.runningPredictionError += (predictionError - this.runningPredictionError) / this.updates;
     return predictionError;

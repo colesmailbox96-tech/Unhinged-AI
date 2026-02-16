@@ -15,7 +15,40 @@ export interface EpisodeResult {
   noveltyCount: number;
   compositeDiscoveryRate: number;
   embeddingClusters: number;
+  novelInteractionCount: number;
+  predictionSnapshot?: PredictionSnapshot;
+  embeddingSnapshot: EmbeddingSnapshot[];
+  trace: string[];
+  replaySignature: string;
+  predictedStrikeArc?: ArcSnapshot;
+  actualStrikeArc?: ArcSnapshot;
   logs: string[];
+}
+
+export interface PredictionSnapshot {
+  action: WorldModelInput['action_verb'];
+  predicted: Pick<WorldModelPrediction, 'expected_damage' | 'expected_tool_wear' | 'expected_fragments'>;
+  actual: { damage: number; toolWear: number; fragments: number };
+  error: { damage: number; toolWear: number; fragments: number };
+}
+
+export interface EmbeddingSnapshot {
+  toolId: number;
+  vector: [number, number, number, number];
+  point: { x: number; y: number };
+}
+
+export interface RunEpisodeOptions {
+  freezeWorldModel?: boolean;
+  disablePredictionModel?: boolean;
+  collectTrace?: boolean;
+}
+
+export interface ArcSnapshot {
+  center: { x: number; y: number };
+  radius: number;
+  start: number;
+  end: number;
 }
 
 interface CandidateAction {
@@ -83,9 +116,10 @@ function chooseCandidate(
   strategy: Strategy,
   candidates: CandidateAction[],
   worldModel: WorldModel,
+  disablePredictionModel = false,
 ): CandidateAction | undefined {
   if (!candidates.length) return undefined;
-  if (strategy === 'RANDOM_STRIKE') return candidates[world.rng.int(0, candidates.length)];
+  if (strategy === 'RANDOM_STRIKE' || disablePredictionModel) return candidates[world.rng.int(0, candidates.length)];
   let best = candidates[0];
   for (const candidate of candidates) {
     if (!candidate.modelInput || !candidate.predicted) continue;
@@ -101,15 +135,58 @@ function chooseCandidate(
   return best;
 }
 
-export function runEpisode(seed: number, strategy: Strategy, perception = new PerceptionHead(seed + 77), steps = 35): EpisodeResult {
+function pca2D(vectors: [number, number, number, number][]): Array<{ x: number; y: number }> {
+  if (!vectors.length) return [];
+  const mean = [0, 0, 0, 0];
+  for (const v of vectors) for (let i = 0; i < 4; i++) mean[i] += v[i];
+  for (let i = 0; i < 4; i++) mean[i] /= vectors.length;
+  const centered = vectors.map((v) => v.map((value, i) => value - mean[i]) as [number, number, number, number]);
+  const cov = Array.from({ length: 4 }, () => [0, 0, 0, 0]);
+  for (const v of centered) {
+    for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) cov[r][c] += v[r] * v[c];
+  }
+  const scale = 1 / Math.max(1, centered.length - 1);
+  for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) cov[r][c] *= scale;
+  const projectAxis = (seedVec: [number, number, number, number], orthTo?: [number, number, number, number]): [number, number, number, number] => {
+    let vec = [...seedVec] as [number, number, number, number];
+    for (let iter = 0; iter < 6; iter++) {
+      const next: [number, number, number, number] = [0, 0, 0, 0];
+      for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) next[r] += cov[r][c] * vec[c];
+      if (orthTo) {
+        const dot = next[0] * orthTo[0] + next[1] * orthTo[1] + next[2] * orthTo[2] + next[3] * orthTo[3];
+        for (let i = 0; i < 4; i++) next[i] -= dot * orthTo[i];
+      }
+      const mag = Math.hypot(...next) || 1;
+      vec = [next[0] / mag, next[1] / mag, next[2] / mag, next[3] / mag];
+    }
+    return vec;
+  };
+  const axisX = projectAxis([1, 1, 0.5, 0.25]);
+  const axisY = projectAxis([0.25, -0.5, 1, -1], axisX);
+  return centered.map((v) => ({
+    x: v[0] * axisX[0] + v[1] * axisX[1] + v[2] * axisX[2] + v[3] * axisX[3],
+    y: v[0] * axisY[0] + v[1] * axisY[1] + v[2] * axisY[2] + v[3] * axisY[3],
+  }));
+}
+
+export function runEpisode(
+  seed: number,
+  strategy: Strategy,
+  perception = new PerceptionHead(seed + 77),
+  steps = 35,
+  options: RunEpisodeOptions = {},
+): EpisodeResult {
   const world = new World(seed);
   const worldModel = new WorldModel();
+  worldModel.setFrozen(Boolean(options.freezeWorldModel));
   const embedding = new ToolEmbedding();
   const initialObjects = [...world.objects.values()];
   const hardnessMaeBefore = perception.hardnessError(initialObjects, world.rng.clone());
   const predictionErrors: number[] = [];
   let noveltyCount = 0;
   let compositeDiscoveries = 0;
+  let predictionSnapshot: PredictionSnapshot | undefined;
+  const trace: string[] = [];
 
   const pickables = chooseByPerception(world, perception);
   if (pickables[0]) world.apply({ type: 'PICK_UP', objId: pickables[0].id });
@@ -159,8 +236,9 @@ export function runEpisode(seed: number, strategy: Strategy, perception = new Pe
       }
     }
 
-    const chosen = chooseCandidate(world, strategy, candidates, worldModel);
+    const chosen = chooseCandidate(world, strategy, candidates, worldModel, Boolean(options.disablePredictionModel));
     if (!chosen) continue;
+    if (options.collectTrace) trace.push(`step=${i} action=${chosen.verb}`);
 
     if (chosen.verb === 'PICK_UP' && chosen.objId) world.apply({ type: 'PICK_UP', objId: chosen.objId });
     if (chosen.verb === 'BIND_TO' && chosen.objId) {
@@ -181,6 +259,24 @@ export function runEpisode(seed: number, strategy: Strategy, perception = new Pe
     }
 
     if (chosen.modelInput && strategy !== 'RANDOM_STRIKE' && outcome) {
+      predictionSnapshot = {
+        action: chosen.modelInput.action_verb,
+        predicted: {
+          expected_damage: chosen.predicted?.expected_damage ?? 0,
+          expected_tool_wear: chosen.predicted?.expected_tool_wear ?? 0,
+          expected_fragments: chosen.predicted?.expected_fragments ?? 0,
+        },
+        actual: {
+          damage: outcome.damage,
+          toolWear: outcome.toolWear,
+          fragments: outcome.fragments,
+        },
+        error: {
+          damage: Math.abs((chosen.predicted?.expected_damage ?? 0) - outcome.damage),
+          toolWear: Math.abs((chosen.predicted?.expected_tool_wear ?? 0) - outcome.toolWear),
+          fragments: Math.abs((chosen.predicted?.expected_fragments ?? 0) - outcome.fragments),
+        },
+      };
       const predictionError = worldModel.update(chosen.modelInput, {
         expected_damage: outcome.damage,
         expected_tool_wear: outcome.toolWear,
@@ -189,6 +285,11 @@ export function runEpisode(seed: number, strategy: Strategy, perception = new Pe
       });
       predictionErrors.push(predictionError);
       if (predictionError > 0.08) noveltyCount += 1;
+    }
+    if (options.collectTrace && outcome) {
+      trace.push(
+        `step=${i} outcome=${outcome.action} dmg=${outcome.damage.toFixed(3)} wear=${outcome.toolWear.toFixed(3)} frags=${outcome.fragments}`,
+      );
     }
 
     const heldAfter = world.agent.heldObjectId ? world.objects.get(world.agent.heldObjectId) : undefined;
@@ -199,6 +300,10 @@ export function runEpisode(seed: number, strategy: Strategy, perception = new Pe
   }
 
   const hardnessMaeAfter = perception.hardnessError([...world.objects.values()], world.rng.clone());
+  const embeddingEntries = embedding.entries();
+  const embeddingPoints = pca2D(embeddingEntries.map((entry) => entry.vector));
+  const embeddingSnapshot = embeddingEntries.map((entry, idx) => ({ toolId: entry.toolId, vector: entry.vector, point: embeddingPoints[idx] ?? { x: 0, y: 0 } }));
+  const replaySignature = trace.join('|');
   return {
     woodGained: world.woodGained,
     woodPerMinute: world.woodGained / (steps / 60),
@@ -208,6 +313,17 @@ export function runEpisode(seed: number, strategy: Strategy, perception = new Pe
     noveltyCount,
     compositeDiscoveryRate: compositeDiscoveries / Math.max(1, steps),
     embeddingClusters: embedding.clusterCount(),
+    novelInteractionCount: embedding.novelInteractionCount(),
+    predictionSnapshot,
+    embeddingSnapshot,
+    trace,
+    replaySignature,
+    predictedStrikeArc: world.predictedStrikeArc
+      ? { center: world.predictedStrikeArc.center, radius: world.predictedStrikeArc.radius, start: world.predictedStrikeArc.start, end: world.predictedStrikeArc.end }
+      : undefined,
+    actualStrikeArc: world.lastStrikeArc
+      ? { center: world.lastStrikeArc.center, radius: world.lastStrikeArc.radius, start: world.lastStrikeArc.start, end: world.lastStrikeArc.end }
+      : undefined,
     logs: world.logs.slice(0, 25),
   };
 }

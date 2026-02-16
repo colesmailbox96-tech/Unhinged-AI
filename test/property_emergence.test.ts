@@ -182,5 +182,38 @@ describe('phase 2 predictive scientist modules', () => {
     embedding.update(3, { damage: 0.05, toolWear: 0.7, fragments: 0, propertyChanges: 0.05 });
     expect(embedding.similarity(1, 2)).toBeGreaterThan(embedding.similarity(1, 3));
     expect(embedding.clusterCount()).toBeGreaterThanOrEqual(2);
+    expect(embedding.entries().length).toBe(3);
+  });
+
+  test('world model freeze blocks learning updates', () => {
+    const model = new WorldModel();
+    const sample = {
+      action_verb: 'STRIKE_WITH' as const,
+      objectA: { visual_features: 0.5, mass_estimate: 0.7, length_estimate: 0.8, texture_proxy: 0.4, interaction_feedback_history: 0.2 },
+      objectB: { visual_features: 0.4, mass_estimate: 0.45, length_estimate: 0.6, texture_proxy: 0.3, interaction_feedback_history: 0.2 },
+      geometry_features: 0.61,
+      relative_position: 0.3,
+    };
+    const truth = { expected_damage: 0.65, expected_tool_wear: 0.09, expected_fragments: 1.5, expected_property_changes: 0.2 };
+    model.setFrozen(true);
+    const before = model.update(sample, truth);
+    let after = before;
+    for (let i = 0; i < 6; i++) after = model.update(sample, truth);
+    expect(after).toBeCloseTo(before, 8);
+  });
+
+  test('episode trace is deterministic and intervention changes behavior', () => {
+    const first = runEpisode(4242, 'BIND_THEN_STRIKE', undefined, 35, { collectTrace: true });
+    const second = runEpisode(4242, 'BIND_THEN_STRIKE', undefined, 35, { collectTrace: true });
+    const intervention = runEpisode(4242, 'BIND_THEN_STRIKE', undefined, 35, { collectTrace: true, disablePredictionModel: true });
+    expect(first.replaySignature).toBe(second.replaySignature);
+    expect(first.replaySignature).not.toBe(intervention.replaySignature);
+  });
+
+  test('episode returns prediction snapshot and embedding projection for reality mode', () => {
+    const result = runEpisode(5151, 'BIND_THEN_STRIKE', undefined, 35, { collectTrace: true });
+    expect(result.predictionSnapshot).toBeDefined();
+    expect(result.embeddingSnapshot.length).toBeGreaterThan(0);
+    expect(result.embeddingSnapshot[0]).toHaveProperty('point');
   });
 });

@@ -1,11 +1,13 @@
-import { runEpisode, type EmbeddingSnapshot, type Strategy } from './ai/agent';
+import { type EmbeddingSnapshot, type Strategy } from './ai/agent';
 import { PerceptionHead } from './ai/perception';
-import { trainPolicy } from './ai/rl';
 import { MetricsStore } from './debug/metrics';
+import { runEpisode as runRunnerEpisode, runSweep, trainEpisodes, type EpisodeMetrics, type RunnerInterventions } from './runner/runner';
 import { CanvasView } from './ui/canvas_view';
+import { AutopilotPanel, type AutopilotConfig, type ExportFormat } from './ui/autopilot_panel';
 import { World } from './sim/world';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#worldCanvas')!;
+const panelEl = document.querySelector<HTMLElement>('#panel')!;
 const metricsEl = document.querySelector<HTMLElement>('#metrics')!;
 const selectedEl = document.querySelector<HTMLElement>('#selected')!;
 const logEl = document.querySelector<HTMLElement>('#log')!;
@@ -53,6 +55,11 @@ let randomComparison:
   | undefined;
 
 let view = new CanvasView(canvas, world, perception);
+const autopilotHistory: EpisodeMetrics[] = [];
+let autopilotRunning = false;
+let autopilotPaused = false;
+let autopilotCancelRequested = false;
+let autopilotStartedAt = 0;
 
 function refresh(): void {
   metricsEl.innerHTML = metrics.toHtml();
@@ -72,13 +79,15 @@ function refresh(): void {
   view.render(selectedEl, logEl);
 }
 
-function runSingle(): void {
-  const mode = metrics.lastEpisode % 2 === 0 ? 'RANDOM_STRIKE' : 'BIND_THEN_STRIKE';
-  const result = runEpisode(seed + metrics.lastEpisode, mode, perception, 35, {
+function currentInterventions(): RunnerInterventions {
+  return {
     freezeWorldModel: realityCheckEnabled && freezeWorldModel,
     disablePredictionModel: realityCheckEnabled && disablePredictionModel,
-    collectTrace: realityCheckEnabled,
-  });
+  };
+}
+
+function applyEpisodeMetrics(episode: EpisodeMetrics): void {
+  const result = episode.result;
   metrics.lastEpisode += 1;
   metrics.woodPerMinute = result.woodPerMinute;
   metrics.hardnessMae = result.hardnessMaeAfter;
@@ -93,6 +102,7 @@ function runSingle(): void {
     freezeErrorTrend.reduce((acc, value) => acc + value, 0) / Math.max(1, freezeErrorTrend.length);
   novelInteractionTrend.push(result.novelInteractionCount);
   compositeRateTrend.push(result.compositeDiscoveryRate);
+  if (episode.deterministicReplay !== undefined) metrics.replayDeterministic = episode.deterministicReplay;
   lastEmbeddingSnapshot = result.embeddingSnapshot;
   world.predictedStrikeArc = result.predictedStrikeArc ? { ...result.predictedStrikeArc, alpha: 0.45 } : undefined;
   world.lastStrikeArc = result.actualStrikeArc ? { ...result.actualStrikeArc, alpha: 0.65 } : undefined;
@@ -109,6 +119,17 @@ function runSingle(): void {
     : undefined;
   world.logs.unshift(...result.logs.slice(0, 6));
   refresh();
+}
+
+function runSingle(): void {
+  const mode = metrics.lastEpisode % 2 === 0 ? 'RANDOM_STRIKE' : 'BIND_THEN_STRIKE';
+  const episode = runRunnerEpisode({
+    seed: seed + metrics.lastEpisode,
+    strategy: mode,
+    steps: 35,
+    interventions: currentInterventions(),
+  });
+  applyEpisodeMetrics(episode);
 }
 
 function renderEmbedding(points: EmbeddingSnapshot[]): string {
@@ -151,6 +172,167 @@ function renderEmbedding(points: EmbeddingSnapshot[]): string {
   return `Embedding PCA-like view<br/>${svg}`;
 }
 
+function toCsv(rows: EpisodeMetrics[]): string {
+  const head = [
+    'episode',
+    'totalEpisodes',
+    'seed',
+    'strategy',
+    'woodPerMinute',
+    'predictionError',
+    'compositeDiscoveryRate',
+    'embeddingClusters',
+    'novelInteractions',
+    'deterministicReplay',
+    'elapsedMs',
+  ];
+  const body = rows.map((row) => [
+    row.episode,
+    row.totalEpisodes,
+    row.seed,
+    row.strategy,
+    row.result.woodPerMinute.toFixed(4),
+    row.result.predictionErrorMean.toFixed(6),
+    row.result.compositeDiscoveryRate.toFixed(6),
+    row.result.embeddingClusters,
+    row.result.novelInteractionCount,
+    row.deterministicReplay ?? '',
+    row.elapsedMs.toFixed(3),
+  ]);
+  return [head.join(','), ...body.map((line) => line.join(','))].join('\n');
+}
+
+function downloadText(filename: string, content: string, contentType: string): void {
+  const blob = new Blob([content], { type: contentType });
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(href);
+}
+
+function exportHistory(format: ExportFormat): void {
+  if (!autopilotHistory.length) return;
+  if (format === 'json') {
+    downloadText('metrics.json', JSON.stringify(autopilotHistory, null, 2), 'application/json');
+    return;
+  }
+  downloadText('metrics.csv', toCsv(autopilotHistory), 'text/csv');
+}
+
+const autopilotPanel = new AutopilotPanel(panelEl, {
+  onStart: (config) => {
+    void startAutopilot(config);
+  },
+  onPause: () => {
+    autopilotPaused = true;
+    autopilotPanel.setStatus('paused');
+  },
+  onResume: () => {
+    autopilotPaused = false;
+    autopilotPanel.setStatus('running');
+  },
+  onCancel: () => {
+    autopilotCancelRequested = true;
+    autopilotPaused = false;
+    autopilotPanel.setStatus('cancelling...');
+  },
+  onExportNow: exportHistory,
+});
+
+async function waitWhilePaused(): Promise<void> {
+  while (autopilotPaused && !autopilotCancelRequested) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+function seedsFor(config: AutopilotConfig): number[] {
+  if (config.preset === 'Baseline 20 seeds x 10 episodes') {
+    return Array.from({ length: 20 }, (_, i) => config.seed + i);
+  }
+  if (config.mode === 'sweep') {
+    return Array.from({ length: 10 }, (_, i) => config.seed + i);
+  }
+  return [config.seed];
+}
+
+function statusText(lastEpisode: EpisodeMetrics, seedCount: number): string {
+  const elapsedSeconds = (performance.now() - autopilotStartedAt) / 1000;
+  return `episode ${lastEpisode.episode}/${lastEpisode.totalEpisodes} | seed ${lastEpisode.seed} (${seedCount} seeds) | elapsed ${elapsedSeconds.toFixed(1)}s`;
+}
+
+async function runPhase(config: AutopilotConfig, interventions: RunnerInterventions, strategy?: Strategy): Promise<EpisodeMetrics[]> {
+  const speedDelayMs = config.mode === 'step-auto' ? Math.max(1, Math.round(1000 / Math.max(1, config.speed))) : 0;
+  const results = await runSweep({
+    seed: config.seed,
+    seeds: seedsFor(config),
+    episodes: Math.max(1, config.mode === 'continuous' ? config.episodes : config.episodes),
+    stepsPerEpisode: config.mode === 'step-auto' ? 1 : config.stepsPerEpisode,
+    randomizeEachEpisode: config.randomizeEachEpisode,
+    strategy,
+    interventions,
+    shouldCancel: () => autopilotCancelRequested,
+    waitWhilePaused,
+    burstSteps: 250,
+    onYield: () => new Promise((resolve) => setTimeout(resolve, speedDelayMs)),
+    onEpisodeEnd: (episode) => {
+      autopilotHistory.push(episode);
+      applyEpisodeMetrics(episode);
+      autopilotPanel.setLastEpisode(episode);
+      autopilotPanel.setStatus(statusText(episode, seedsFor(config).length));
+      if (config.exportEvery === 'episode') exportHistory(config.exportFormat);
+    },
+  });
+  return results;
+}
+
+async function startAutopilot(config: AutopilotConfig): Promise<void> {
+  if (autopilotRunning) return;
+  autopilotRunning = true;
+  autopilotPaused = false;
+  autopilotCancelRequested = false;
+  autopilotStartedAt = performance.now();
+  if (config.exportEvery === 'batch') autopilotHistory.length = 0;
+  autopilotPanel.setStatus('running');
+
+  const interventions: RunnerInterventions = {
+    ...config.interventions,
+    disablePredictionModel: realityCheckEnabled ? disablePredictionModel : config.interventions.disablePredictionModel,
+    freezeWorldModel: realityCheckEnabled ? freezeWorldModel : config.interventions.freezeWorldModel,
+  };
+
+  try {
+    if (config.preset === 'Random vs Agent comparison') {
+      const random = await runPhase(config, { ...interventions, randomAgent: true }, 'RANDOM_STRIKE');
+      const agent = await runPhase(config, { ...interventions, randomAgent: false }, 'BIND_THEN_STRIKE');
+      const avg = (values: number[]): number => values.reduce((acc, value) => acc + value, 0) / Math.max(1, values.length);
+      randomComparison = {
+        random: {
+          toolDiscovery: avg(random.map((entry) => entry.result.novelInteractionCount)),
+          compositeRate: avg(random.map((entry) => entry.result.compositeDiscoveryRate)),
+          predictionAccuracy: avg(random.map((entry) => 1 / (1 + entry.result.predictionErrorMean))),
+        },
+        agent: {
+          toolDiscovery: avg(agent.map((entry) => entry.result.novelInteractionCount)),
+          compositeRate: avg(agent.map((entry) => entry.result.compositeDiscoveryRate)),
+          predictionAccuracy: avg(agent.map((entry) => 1 / (1 + entry.result.predictionErrorMean))),
+        },
+      };
+      refresh();
+    } else {
+      const strategy: Strategy = config.interventions.randomAgent ? 'RANDOM_STRIKE' : 'BIND_THEN_STRIKE';
+      await runPhase(config, interventions, strategy);
+    }
+    if (config.exportEvery === 'batch') exportHistory(config.exportFormat);
+    autopilotPanel.setStatus(autopilotCancelRequested ? 'cancelled' : 'completed');
+  } finally {
+    autopilotRunning = false;
+    autopilotPaused = false;
+    autopilotCancelRequested = false;
+  }
+}
+
 resetBtn.onclick = () => {
   seed += 1;
   world = new World(seed);
@@ -160,7 +342,7 @@ resetBtn.onclick = () => {
 };
 
 trainBtn.onclick = () => {
-  metrics.training = trainPolicy(seed, 100);
+  metrics.training = trainEpisodes(seed, 100);
   world.logs.unshift(
     `Training done improve=${metrics.training.improvementPct.toFixed(1)}% baseline=${metrics.training.baselineMean.toFixed(2)} trained=${metrics.training.trainedMean.toFixed(2)}`,
   );
@@ -192,16 +374,18 @@ disablePredictionBtn.onclick = () => {
 };
 randomSwapBtn.onclick = () => {
   const compareSeed = seed + metrics.lastEpisode;
-  const randomResult = runEpisode(compareSeed, 'RANDOM_STRIKE', new PerceptionHead(compareSeed + 99), 35, {
-    freezeWorldModel: freezeWorldModel,
-    disablePredictionModel: false,
-    collectTrace: true,
-  });
-  const agentResult = runEpisode(compareSeed, 'BIND_THEN_STRIKE', new PerceptionHead(compareSeed + 99), 35, {
-    freezeWorldModel: freezeWorldModel,
-    disablePredictionModel: disablePredictionModel,
-    collectTrace: true,
-  });
+  const randomResult = runRunnerEpisode({
+    seed: compareSeed,
+    strategy: 'RANDOM_STRIKE',
+    steps: 35,
+    interventions: { freezeWorldModel: freezeWorldModel },
+  }).result;
+  const agentResult = runRunnerEpisode({
+    seed: compareSeed,
+    strategy: 'BIND_THEN_STRIKE',
+    steps: 35,
+    interventions: { freezeWorldModel: freezeWorldModel, disablePredictionModel: disablePredictionModel },
+  }).result;
   randomComparison = {
     random: {
       toolDiscovery: randomResult.novelInteractionCount,
@@ -221,11 +405,16 @@ randomSwapBtn.onclick = () => {
 recordEpisodeBtn.onclick = () => {
   const recordSeed = seed + metrics.lastEpisode;
   const strategy: Strategy = 'BIND_THEN_STRIKE';
-  const result = runEpisode(recordSeed, strategy, new PerceptionHead(recordSeed + 99), 35, {
-    freezeWorldModel: freezeWorldModel,
-    disablePredictionModel: disablePredictionModel,
-    collectTrace: true,
-  });
+  const result = runRunnerEpisode({
+    seed: recordSeed,
+    strategy,
+    steps: 35,
+    options: {
+      freezeWorldModel: freezeWorldModel,
+      disablePredictionModel: disablePredictionModel,
+      collectTrace: true,
+    },
+  }).result;
   recordedEpisode = {
     seed: recordSeed,
     strategy,
@@ -242,11 +431,16 @@ replayEpisodeBtn.onclick = () => {
     refresh();
     return;
   }
-  const replay = runEpisode(recordedEpisode.seed, recordedEpisode.strategy, new PerceptionHead(recordedEpisode.seed + 99), 35, {
-    freezeWorldModel: freezeWorldModel,
-    disablePredictionModel: disablePredictionModel,
-    collectTrace: true,
-  });
+  const replay = runRunnerEpisode({
+    seed: recordedEpisode.seed,
+    strategy: recordedEpisode.strategy,
+    steps: 35,
+    options: {
+      freezeWorldModel: freezeWorldModel,
+      disablePredictionModel: disablePredictionModel,
+      collectTrace: true,
+    },
+  }).result;
   const deterministic =
     replay.replaySignature === recordedEpisode.replaySignature &&
     replay.trace.filter((entry) => entry.includes('action=')).join('|') === recordedEpisode.actions.join('|') &&

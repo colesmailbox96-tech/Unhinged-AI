@@ -2,12 +2,14 @@ import { PerceptionHead, type Observation } from '../ai/perception';
 import { ReplayBuffer } from '../ai/replay_buffer';
 import { ToolEmbedding } from '../ai/tool_embedding';
 import { WorldModel, type WorldModelInput, type WorldModelOutcome, type WorldModelPrediction } from '../ai/world_model';
+import { ClosedLoopController } from '../ai/controller';
 import type { InteractionOutcome } from '../sim/world';
 import { World } from '../sim/world';
 import type { ObjID, WorldObject } from '../sim/object_model';
 import { MilestoneTracker, type MilestoneEvent } from '../sim/milestones';
+import type { MeasurementResult } from '../sim/metrology';
 
-type LiveVerb = 'PICK_UP' | 'BIND_TO' | 'STRIKE_WITH' | 'GRIND' | 'REST';
+type LiveVerb = 'PICK_UP' | 'BIND_TO' | 'STRIKE_WITH' | 'GRIND' | 'HEAT' | 'SOAK' | 'COOL' | 'ANCHOR' | 'CONTROL' | 'REST';
 
 interface CandidateAction {
   verb: LiveVerb;
@@ -16,6 +18,7 @@ interface CandidateAction {
   modelInput?: WorldModelInput;
   predicted?: WorldModelPrediction;
   score?: number;
+  intensity?: number;
 }
 
 interface ReplayTransition {
@@ -59,6 +62,11 @@ export interface LiveTickResult {
   novelInteractionsPerMinute: number;
   compositeDiscoveryRate: number;
   embeddingClusters: number;
+  repeatabilityScore: number;
+  precisionScore: number;
+  controllerTarget?: { metric: string; target: number; achieved: number };
+  measurements: MeasurementResult[];
+  stationQuality: number;
   milestones: MilestoneEvent[];
 }
 
@@ -93,6 +101,11 @@ export interface LiveSnapshot {
   world: {
     woodGained: number;
     objects: WorldObject[];
+  };
+  manufacturing: {
+    repeatabilityScore: number;
+    precisionScore: number;
+    stationCount: number;
   };
   modelState: {
     worldModel: ReturnType<WorldModel['snapshot']>;
@@ -157,12 +170,18 @@ function buildModelInput(
   };
 }
 
-function chooseCandidate(candidates: CandidateAction[], worldModel: WorldModel): CandidateAction | undefined {
+function chooseCandidate(
+  candidates: CandidateAction[],
+  worldModel: WorldModel,
+  noveltyWindow: Map<string, number>,
+): CandidateAction | undefined {
   if (!candidates.length) return undefined;
   let best = candidates[0];
   for (const candidate of candidates) {
     if (!candidate.modelInput || !candidate.predicted) continue;
-    const curiosity = worldModel.novelty(candidate.modelInput);
+    const noveltyKey = `${candidate.modelInput.action_verb}:${candidate.objId ?? candidate.targetId ?? 0}`;
+    const seen = noveltyWindow.get(noveltyKey) ?? 0;
+    const curiosity = worldModel.novelty(candidate.modelInput) * Math.max(0.2, 1 - seen * 0.15);
     const utility =
       candidate.predicted.expected_damage * UTILITY_WEIGHTS.damage +
       candidate.predicted.expected_fragments * UTILITY_WEIGHTS.fragments +
@@ -170,6 +189,10 @@ function chooseCandidate(candidates: CandidateAction[], worldModel: WorldModel):
       candidate.predicted.expected_tool_wear * UTILITY_WEIGHTS.toolWear;
     candidate.score = curiosity + utility;
     if ((candidate.score ?? -Infinity) > (best.score ?? -Infinity)) best = candidate;
+  }
+  if (best.modelInput) {
+    const noveltyKey = `${best.modelInput.action_verb}:${best.objId ?? best.targetId ?? 0}`;
+    noveltyWindow.set(noveltyKey, (noveltyWindow.get(noveltyKey) ?? 0) + 1);
   }
   return best;
 }
@@ -185,10 +208,15 @@ export class LiveModeEngine {
   readonly worldModel: WorldModel;
   readonly embedding: ToolEmbedding;
   readonly perception: PerceptionHead;
+  readonly controller = new ClosedLoopController();
   tick = 0;
   simTimeSeconds = 0;
   compositeCount = 0;
   trainMsThisSecond = 0;
+  repeatabilityScore = 0;
+  precisionScore = 0;
+  private readonly recentStrikeDamage: number[] = [];
+  private readonly noveltyWindow = new Map<string, number>();
   private readonly config: LiveModeConfig;
 
   constructor(config: LiveModeConfig) {
@@ -233,6 +261,12 @@ export class LiveModeEngine {
     }
   }
 
+  private controllerTargetFor(held: WorldObject): { metric: 'surface_planarity' | 'microstructure_order' | 'impurity_level'; target: number } {
+    if (held.latentPrecision.surface_planarity < 0.78) return { metric: 'surface_planarity', target: 0.82 };
+    if (held.latentPrecision.microstructure_order < 0.75) return { metric: 'microstructure_order', target: 0.8 };
+    return { metric: 'impurity_level', target: 0.25 };
+  }
+
   private createCandidates(held: WorldObject | undefined): CandidateAction[] {
     const targetId = this.world.getTargetId();
     const target = targetId ? this.world.objects.get(targetId) : undefined;
@@ -253,15 +287,38 @@ export class LiveModeEngine {
       const grindInput = buildModelInput(this.world, this.perception, 'GRIND', held, nearby);
       candidates.push({ verb: 'GRIND', objId: nearby.id, modelInput: grindInput, predicted: this.worldModel.predict(grindInput) });
     }
+    if (held.latentPrecision.surface_planarity < 0.65 || held.latentPrecision.microstructure_order < 0.65) {
+      candidates.push({ verb: 'CONTROL', score: 0.55 + (1 - held.latentPrecision.surface_planarity) * 0.2 });
+    }
+    if (!held.anchored && held.constituents && held.constituents.length > 1 && held.integrity > 0.6) {
+      candidates.push({ verb: 'ANCHOR', score: 0.35 });
+    }
     return candidates;
   }
 
-  private applyCandidate(chosen: CandidateAction): InteractionOutcome | undefined {
+  private applyCandidate(chosen: CandidateAction): { outcome?: InteractionOutcome; measurement?: MeasurementResult; controllerAchieved?: number; controllerTarget?: { metric: string; target: number } } {
     if (chosen.verb === 'PICK_UP' && chosen.objId) this.world.apply({ type: 'PICK_UP', objId: chosen.objId });
     if (chosen.verb === 'BIND_TO' && chosen.objId) this.world.apply({ type: 'BIND_TO', objId: chosen.objId });
-    if (chosen.verb === 'GRIND' && chosen.objId) this.world.apply({ type: 'GRIND', abrasiveId: chosen.objId });
+    if (chosen.verb === 'GRIND' && chosen.objId) this.world.apply({ type: 'GRIND', abrasiveId: chosen.objId, intensity: chosen.intensity });
     if (chosen.verb === 'STRIKE_WITH' && chosen.targetId) this.world.apply({ type: 'STRIKE_WITH', targetId: chosen.targetId });
-    return this.world.lastInteractionOutcome;
+    if (chosen.verb === 'HEAT') this.world.apply({ type: 'HEAT', intensity: chosen.intensity ?? 0.5 });
+    if (chosen.verb === 'SOAK') this.world.apply({ type: 'SOAK', intensity: chosen.intensity ?? 0.5 });
+    if (chosen.verb === 'COOL') this.world.apply({ type: 'COOL', intensity: chosen.intensity ?? 0.5 });
+    if (chosen.verb === 'ANCHOR') this.world.apply({ type: 'ANCHOR' });
+    if (chosen.verb === 'CONTROL' && this.world.agent.heldObjectId) {
+      const held = this.world.objects.get(this.world.agent.heldObjectId);
+      if (held) {
+        const target = this.controllerTargetFor(held);
+        const step = this.controller.step(this.world, held, target);
+        return {
+          outcome: this.world.lastInteractionOutcome,
+          measurement: step.measured,
+          controllerAchieved: step.achieved,
+          controllerTarget: target,
+        };
+      }
+    }
+    return { outcome: this.world.lastInteractionOutcome };
   }
 
   private ensureEcologyPressure(): void {
@@ -279,13 +336,33 @@ export class LiveModeEngine {
     let chosen: CandidateAction = { verb: 'REST', score: 0 };
     if (memory.energy >= 0.08) {
       const candidates = this.createCandidates(held);
-      const selected = chooseCandidate(candidates, this.worldModel);
+      const selected = chooseCandidate(candidates, this.worldModel, this.noveltyWindow);
       if (selected) chosen = selected;
     }
-    const outcome = chosen.verb === 'REST' ? undefined : this.applyCandidate(chosen);
+    const applyResult = chosen.verb === 'REST' ? {} : this.applyCandidate(chosen);
+    const outcome = applyResult.outcome;
     if (chosen.verb !== 'REST') memory.energy = Math.max(0, memory.energy - 0.07);
     if (chosen.verb === 'BIND_TO') this.compositeCount += 1;
-    const effectiveness = outcome ? outcome.damage + outcome.fragments * 0.4 - outcome.toolWear * 0.3 : 0;
+    if (chosen.verb === 'STRIKE_WITH' && outcome) {
+      this.recentStrikeDamage.push(outcome.damage);
+      while (this.recentStrikeDamage.length > 10) this.recentStrikeDamage.shift();
+    }
+    const repeatabilityVariance = (() => {
+      if (this.recentStrikeDamage.length < 2) return 0;
+      const mean = this.recentStrikeDamage.reduce((sum, value) => sum + value, 0) / this.recentStrikeDamage.length;
+      return this.recentStrikeDamage.reduce((sum, value) => sum + (value - mean) ** 2, 0) / this.recentStrikeDamage.length;
+    })();
+    this.repeatabilityScore = 1 / (1 + repeatabilityVariance);
+    const heldAfterProcess = this.world.agent.heldObjectId ? this.world.objects.get(this.world.agent.heldObjectId) : undefined;
+    const precisionNow = heldAfterProcess
+      ? (heldAfterProcess.latentPrecision.surface_planarity +
+          heldAfterProcess.latentPrecision.microstructure_order +
+          (1 - heldAfterProcess.latentPrecision.impurity_level)) /
+        3
+      : 0;
+    this.precisionScore = precisionNow;
+    const effectivenessBase = outcome ? outcome.damage + outcome.fragments * 0.4 - outcome.toolWear * 0.3 : 0;
+    const effectiveness = effectivenessBase + this.repeatabilityScore * 0.2 + this.precisionScore * 0.25;
     let predictionError = 0;
     if (chosen.modelInput && outcome) {
       const predicted = chosen.predicted ?? this.worldModel.predict(chosen.modelInput);
@@ -310,6 +387,11 @@ export class LiveModeEngine {
       });
     }
     const heldAfter = this.world.agent.heldObjectId ? this.world.objects.get(this.world.agent.heldObjectId) : undefined;
+    const measurements = heldAfter ? this.world.measureObject(heldAfter.id, heldAfter.id) : [];
+    const stationQuality =
+      heldAfter?.id !== undefined
+        ? this.world.stations.get(heldAfter.id)?.quality ?? 0
+        : [...this.world.stations.values()].reduce((best, station) => Math.max(best, station.quality), 0);
     this.ingestMemory(memory, chosen.verb, effectiveness, heldAfter);
     const replaySignature = `${this.tick}:${chosen.verb}:${outcome?.action ?? 'none'}:${(outcome?.damage ?? 0).toFixed(4)}`;
     const objects = [outcome?.toolId ?? 0, outcome?.targetId ?? 0].filter((id) => id > 0);
@@ -321,17 +403,23 @@ export class LiveModeEngine {
       objectIds: objects,
     });
     const milestoneEvents = this.milestones.ingest(
-      {
-        timestamp: this.simTimeSeconds,
-        agentId: memory.id,
-        action: chosen.verb,
-        objectIds: objects,
-        compositeKey: chosen.verb === 'BIND_TO' ? `${objects.join(':')}` : undefined,
-        predictionError,
-        effectiveness,
-      },
-      undefined,
-    );
+        {
+          timestamp: this.simTimeSeconds,
+          agentId: memory.id,
+          action: chosen.verb,
+          objectIds: objects,
+          compositeKey: chosen.verb === 'BIND_TO' ? `${objects.join(':')}` : undefined,
+          predictionError,
+          effectiveness,
+          stationQuality,
+          measurementSigma: measurements[0]?.sigma,
+          measurementSigmaBaseline: measurements[0]?.sampleCount ? measurements[0].sigma * Math.sqrt(measurements[0].sampleCount) : undefined,
+          controllerTarget: applyResult.controllerTarget?.target,
+          controllerAchieved: applyResult.controllerAchieved,
+          processChainAction: chosen.verb,
+        },
+        undefined,
+      );
     const elapsedMinutes = Math.max(1 / 60, this.simTimeSeconds / 60);
     return {
       tick: this.tick,
@@ -343,6 +431,17 @@ export class LiveModeEngine {
       novelInteractionsPerMinute: this.embedding.novelInteractionCount() / elapsedMinutes,
       compositeDiscoveryRate: this.compositeCount / Math.max(1, this.tick),
       embeddingClusters: this.embedding.clusterCount(),
+      repeatabilityScore: this.repeatabilityScore,
+      precisionScore: this.precisionScore,
+      controllerTarget: applyResult.controllerTarget
+        ? {
+            metric: applyResult.controllerTarget.metric,
+            target: applyResult.controllerTarget.target,
+            achieved: applyResult.controllerAchieved ?? 0,
+          }
+        : undefined,
+      measurements,
+      stationQuality,
       milestones: milestoneEvents,
     };
   }
@@ -425,6 +524,11 @@ export class LiveModeEngine {
       world: {
         woodGained: this.world.woodGained,
         objects: [...this.world.objects.values()].map((object) => ({ ...object, pos: { ...object.pos }, vel: { ...object.vel } })),
+      },
+      manufacturing: {
+        repeatabilityScore: this.repeatabilityScore,
+        precisionScore: this.precisionScore,
+        stationCount: this.world.stations.size,
       },
       modelState: {
         worldModel: this.worldModel.snapshot(),

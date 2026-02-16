@@ -12,6 +12,7 @@ export interface LiveModePanelConfig {
   deterministic: boolean;
   renderEveryNTicks: number;
   rollingSeconds: number;
+  showTrueLatentState: boolean;
 }
 
 export interface LiveModePanelHandlers {
@@ -32,6 +33,7 @@ export class LiveModePanel {
   private readonly statusEl: HTMLElement;
   private readonly timelineEl: HTMLElement;
   private readonly bookmarkEl: HTMLSelectElement;
+  private readonly dashboardEl: HTMLElement;
 
   constructor(container: HTMLElement, handlers: LiveModePanelHandlers) {
     const panel = document.createElement('section');
@@ -50,7 +52,7 @@ export class LiveModePanel {
           <label>maxTrainMs/sec <input data-live="trainBudget" type="number" min="1" value="35" /></label>
           <label>Rolling record (sec) <input data-live="rollingSeconds" type="number" min="5" value="30" /></label>
           <label><input data-live="deterministic" type="checkbox" /> Deterministic Live</label>
-          <span></span>
+          <label><input data-live="showLatentDebug" type="checkbox" /> Show true latent state (debug)</label>
         </div>
         <div style="margin-top:6px">
           <button data-live="start">Start Live</button>
@@ -67,6 +69,7 @@ export class LiveModePanel {
           <button data-live="replayBookmark">Replay bookmark</button>
         </div>
         <div data-live="status" class="metric">idle</div>
+        <div data-live="manufacturing" class="metric" style="max-height:180px;overflow:auto"></div>
         <div data-live="timeline" class="metric" style="max-height:180px;overflow:auto"></div>
       </div>
     `;
@@ -74,6 +77,7 @@ export class LiveModePanel {
     this.statusEl = panel.querySelector('[data-live="status"]') as HTMLElement;
     this.timelineEl = panel.querySelector('[data-live="timeline"]') as HTMLElement;
     this.bookmarkEl = panel.querySelector('[data-live="bookmarkSelect"]') as HTMLSelectElement;
+    this.dashboardEl = panel.querySelector('[data-live="manufacturing"]') as HTMLElement;
     const tpsInput = panel.querySelector('[data-live="tps"]') as HTMLInputElement;
     const tpsValue = panel.querySelector('[data-live="tpsValue"]') as HTMLElement;
     tpsInput.addEventListener('input', () => {
@@ -112,6 +116,7 @@ export class LiveModePanel {
       deterministic: (this.element.querySelector('[data-live="deterministic"]') as HTMLInputElement).checked,
       renderEveryNTicks: Math.max(1, Number((this.element.querySelector('[data-live="renderEvery"]') as HTMLInputElement).value) || 5),
       rollingSeconds: Math.max(5, Number((this.element.querySelector('[data-live="rollingSeconds"]') as HTMLInputElement).value) || 30),
+      showTrueLatentState: (this.element.querySelector('[data-live="showLatentDebug"]') as HTMLInputElement).checked,
     };
   }
 
@@ -124,13 +129,21 @@ export class LiveModePanel {
       .slice()
       .reverse()
       .map((event) => {
-        const label = `t=${event.timestamp.toFixed(1)}s agent=${event.agentId} ${event.kind}`;
+        const summary = Object.entries(event.summary)
+          .slice(0, 3)
+          .map(([key, value]) => `${key}=${value.toFixed(3)}`)
+          .join(' ');
+        const label = `t=${event.timestamp.toFixed(1)}s agent=${event.agentId} ${event.kind} ${summary}`;
         return `<button data-milestone="${Number(event.id)}" style="display:block;width:100%;text-align:left;margin:2px 0">${label
           .replaceAll('&', '&amp;')
           .replaceAll('<', '&lt;')
           .replaceAll('>', '&gt;')}</button>`;
       })
       .join('');
+  }
+
+  setManufacturingDashboard(lines: string[]): void {
+    this.dashboardEl.innerHTML = lines.join('<br/>');
   }
 
   setBookmarks(bookmarkIds: string[]): void {

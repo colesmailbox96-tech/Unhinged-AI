@@ -1,8 +1,10 @@
 import { deriveGripScore, type ObjID, type ShapeType, type WorldObject } from './object_model';
-import { bindObjects, grind, strike } from './interactions';
+import { bindObjects, cool, grind, heat, soak, strike } from './interactions';
 import { fibrousTargetProps, materialDistributions, sampleProperties } from './material_distributions';
 import { fibrousTargetScore } from './properties';
 import { RNG } from './rng';
+import { type MeasurementResult, measureConductivity, measureGeometry, measureHardness, measureMass, measureOptical } from './metrology';
+import { anchorObject, stationFromAnchoredObject, type AnchoredStation } from './stations';
 
 export type PrimitiveVerb =
   | { type: 'MOVE_TO'; x: number; y: number }
@@ -10,9 +12,11 @@ export type PrimitiveVerb =
   | { type: 'DROP' }
   | { type: 'BIND_TO'; objId: ObjID }
   | { type: 'STRIKE_WITH'; targetId: ObjID }
-  | { type: 'GRIND'; abrasiveId: ObjID }
+  | { type: 'GRIND'; abrasiveId: ObjID; intensity?: number }
   | { type: 'HEAT'; intensity: number }
-  | { type: 'SOAK'; intensity: number };
+  | { type: 'SOAK'; intensity: number }
+  | { type: 'COOL'; intensity: number }
+  | { type: 'ANCHOR'; worldPos?: { x: number; y: number } };
 
 export interface AgentState {
   id: number;
@@ -59,6 +63,8 @@ export class World {
   readonly agent: AgentState = { id: 1, pos: { x: 5, y: 5 } };
   nextObjectId = 1;
   woodGained = 0;
+  readonly stations = new Map<ObjID, AnchoredStation>();
+  readonly lastMeasurements = new Map<ObjID, MeasurementResult[]>();
 
   constructor(seed: number) {
     this.rng = new RNG(seed);
@@ -76,6 +82,8 @@ export class World {
     this.predictionRealityOverlay = undefined;
     this.lastInteractionOutcome = undefined;
     this.nextObjectId = 1;
+    this.stations.clear();
+    this.lastMeasurements.clear();
     this.agent.pos = { x: 5, y: 5 };
     this.agent.heldObjectId = undefined;
 
@@ -131,13 +139,28 @@ export class World {
     return 'plate';
   }
 
-  private addObject(input: Omit<WorldObject, 'id' | 'vel' | 'grip_score'>): ObjID {
+  private addObject(
+    input: Omit<WorldObject, 'id' | 'vel' | 'grip_score' | 'latentPrecision' | 'processHistory'> &
+      Partial<Pick<WorldObject, 'latentPrecision' | 'processHistory'>>,
+  ): ObjID {
     const id = this.nextObjectId++;
     this.objects.set(id, {
       ...input,
       id,
       vel: { x: 0, y: 0 },
       grip_score: deriveGripScore(input.shapeType, input.length, input.thickness, input.props.roughness),
+      latentPrecision: input.latentPrecision ?? {
+        surface_planarity: this.rng.range(0.25, 0.7),
+        impurity_level: this.rng.range(0.2, 0.75),
+        microstructure_order: this.rng.range(0.2, 0.7),
+        internal_stress: this.rng.range(0.2, 0.65),
+        feature_resolution_limit: this.rng.range(0.2, 0.65),
+      },
+      processHistory: input.processHistory ?? {
+        grind_passes: 0,
+        thermal_cycles: 0,
+        soak_cycles: 0,
+      },
     });
     return id;
   }
@@ -257,7 +280,9 @@ export class World {
       const abrasive = this.getObject(action.abrasiveId);
       if (!held || !abrasive || held.id === abrasive.id) return;
       const beforeSharpness = held.props.sharpness;
-      const result = grind(held, abrasive);
+      const station = this.stations.get(held.id);
+      const stationBoost = station ? station.bonuses.maxPlanarityGain * 0.4 : 0;
+      const result = grind(held, abrasive, action.intensity ?? 0.75 + stationBoost);
       result.newObject.heldBy = this.agent.id;
       this.objects.set(held.id, result.newObject);
       this.logs.unshift(`GRIND ${held.id} with ${abrasive.id} wear=${result.wear.toFixed(2)}`);
@@ -272,5 +297,72 @@ export class World {
       };
       return;
     }
+
+    if (action.type === 'HEAT') {
+      if (!this.agent.heldObjectId) return;
+      const held = this.getObject(this.agent.heldObjectId);
+      if (!held) return;
+      const updated = heat(held, action.intensity);
+      updated.heldBy = this.agent.id;
+      this.objects.set(held.id, updated);
+      this.logs.unshift(`HEAT ${held.id} i=${action.intensity.toFixed(2)}`);
+      return;
+    }
+
+    if (action.type === 'SOAK') {
+      if (!this.agent.heldObjectId) return;
+      const held = this.getObject(this.agent.heldObjectId);
+      if (!held) return;
+      const updated = soak(held, action.intensity);
+      updated.heldBy = this.agent.id;
+      this.objects.set(held.id, updated);
+      this.logs.unshift(`SOAK ${held.id} i=${action.intensity.toFixed(2)}`);
+      return;
+    }
+
+    if (action.type === 'COOL') {
+      if (!this.agent.heldObjectId) return;
+      const held = this.getObject(this.agent.heldObjectId);
+      if (!held) return;
+      const updated = cool(held, action.intensity);
+      updated.heldBy = this.agent.id;
+      this.objects.set(held.id, updated);
+      this.logs.unshift(`COOL ${held.id} i=${action.intensity.toFixed(2)}`);
+      return;
+    }
+
+    if (action.type === 'ANCHOR') {
+      if (!this.agent.heldObjectId) return;
+      const held = this.getObject(this.agent.heldObjectId);
+      if (!held) return;
+      const worldPos = action.worldPos ?? { ...this.agent.pos };
+      const anchored = anchorObject(held, worldPos);
+      this.objects.set(held.id, anchored);
+      this.agent.heldObjectId = undefined;
+      anchored.heldBy = undefined;
+      const station = stationFromAnchoredObject(anchored);
+      this.stations.set(anchored.id, station);
+      this.logs.unshift(`ANCHOR ${held.id} q=${station.quality.toFixed(2)}`);
+      return;
+    }
+  }
+
+  measureObject(
+    objId: ObjID,
+    instrumentId?: ObjID,
+  ): MeasurementResult[] {
+    const obj = this.getObject(objId);
+    if (!obj) return [];
+    const instrument = instrumentId ? this.getObject(instrumentId) : undefined;
+    const station = [...this.stations.values()].find((entry) => Math.hypot(entry.worldPos.x - obj.pos.x, entry.worldPos.y - obj.pos.y) <= 1.2);
+    const out = [
+      measureMass(obj, this.rng, instrument, station),
+      measureGeometry(obj, this.rng, instrument, station),
+      measureHardness(obj, this.rng, instrument, station),
+      measureConductivity(obj, this.rng, instrument, station),
+      measureOptical(obj, this.rng, instrument, station),
+    ];
+    this.lastMeasurements.set(objId, out);
+    return out;
   }
 }

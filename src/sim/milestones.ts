@@ -6,7 +6,12 @@ export interface MilestoneEvent {
     | 'first-high-effectiveness-tool'
     | 'first-repeated-sequence'
     | 'first-repeatability-improvement'
-    | 'first-low-prediction-error-after-sequence';
+    | 'first-low-prediction-error-after-sequence'
+    | 'first-anchored-station-created'
+    | 'first-measurement-ci-halved'
+    | 'first-controller-planarity-target-hit'
+    | 'first-stable-process-chain'
+    | 'first-calibration-object-reused';
   timestamp: number;
   agentId: number;
   objectIds: number[];
@@ -22,6 +27,12 @@ export interface MilestoneInput {
   compositeKey?: string;
   predictionError?: number;
   effectiveness?: number;
+  stationQuality?: number;
+  measurementSigma?: number;
+  measurementSigmaBaseline?: number;
+  controllerTarget?: number;
+  controllerAchieved?: number;
+  processChainAction?: string;
 }
 
 const DEFAULT_REPEAT_COUNT = 3;
@@ -41,6 +52,8 @@ export class MilestoneTracker {
   private readonly sequenceCounts = new Map<string, number>();
   private readonly sequenceErrors = new Map<string, number[]>();
   private readonly effectivenessSamples: number[] = [];
+  private readonly processWindow: string[] = [];
+  private readonly objectReuseCount = new Map<number, number>();
   private readonly repeatCount: number;
 
   constructor(repeatCount = DEFAULT_REPEAT_COUNT) {
@@ -81,6 +94,39 @@ export class MilestoneTracker {
       if (count >= 2) {
         const repeatedComposite = this.emit('first-repeated-composite-pattern', input, { count }, replayBookmark);
         if (repeatedComposite) newEvents.push(repeatedComposite);
+      }
+    }
+
+    if (typeof input.stationQuality === 'number' && input.stationQuality > 0) {
+      const stationEvent = this.emit('first-anchored-station-created', input, { stationQuality: input.stationQuality }, replayBookmark);
+      if (stationEvent) newEvents.push(stationEvent);
+    }
+
+    if (
+      typeof input.measurementSigma === 'number' &&
+      typeof input.measurementSigmaBaseline === 'number' &&
+      input.measurementSigmaBaseline > 0 &&
+      input.measurementSigma <= input.measurementSigmaBaseline * 0.5
+    ) {
+      const ciEvent = this.emit(
+        'first-measurement-ci-halved',
+        input,
+        { sigma: input.measurementSigma, baselineSigma: input.measurementSigmaBaseline },
+        replayBookmark,
+      );
+      if (ciEvent) newEvents.push(ciEvent);
+    }
+
+    if (typeof input.controllerTarget === 'number' && typeof input.controllerAchieved === 'number') {
+      const error = Math.abs(input.controllerTarget - input.controllerAchieved);
+      if (error <= 0.08) {
+        const controlEvent = this.emit(
+          'first-controller-planarity-target-hit',
+          input,
+          { target: input.controllerTarget, achieved: input.controllerAchieved, error },
+          replayBookmark,
+        );
+        if (controlEvent) newEvents.push(controlEvent);
       }
     }
 
@@ -126,6 +172,27 @@ export class MilestoneTracker {
           const lowError = this.emit('first-low-prediction-error-after-sequence', input, { predictionError: input.predictionError }, replayBookmark);
           if (lowError) newEvents.push(lowError);
         }
+      }
+    }
+
+    if (input.objectIds.length > 0) {
+      const first = input.objectIds[0];
+      const count = (this.objectReuseCount.get(first) ?? 0) + 1;
+      this.objectReuseCount.set(first, count);
+      if (count >= 3) {
+        const calibration = this.emit('first-calibration-object-reused', input, { objectId: first, count }, replayBookmark);
+        if (calibration) newEvents.push(calibration);
+      }
+    }
+
+    this.processWindow.push(input.processChainAction ?? input.action);
+    while (this.processWindow.length > 8) this.processWindow.shift();
+    if (this.processWindow.length >= 4) {
+      const chain = this.processWindow.slice(-4);
+      const distinct = new Set(chain).size;
+      if (distinct >= 3) {
+        const stable = this.emit('first-stable-process-chain', input, { length: chain.length, distinct }, replayBookmark);
+        if (stable) newEvents.push(stable);
       }
     }
 

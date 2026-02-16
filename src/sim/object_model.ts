@@ -8,6 +8,20 @@ export interface Vec2 {
   y: number;
 }
 
+export interface LatentPrecisionState {
+  surface_planarity: number;
+  impurity_level: number;
+  microstructure_order: number;
+  internal_stress: number;
+  feature_resolution_limit: number;
+}
+
+export interface ProcessHistoryState {
+  grind_passes: number;
+  thermal_cycles: number;
+  soak_cycles: number;
+}
+
 export interface WorldObject {
   id: ObjID;
   pos: Vec2;
@@ -24,6 +38,9 @@ export interface WorldObject {
   heldBy?: number;
   constituents?: ObjID[];
   debugFamily?: string;
+  anchored?: boolean;
+  latentPrecision: LatentPrecisionState;
+  processHistory: ProcessHistoryState;
 }
 
 export function deriveGripScore(shapeType: ShapeType, length: number, thickness: number, roughness: number): number {

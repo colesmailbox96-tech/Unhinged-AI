@@ -5,6 +5,7 @@ import { World } from '../sim/world';
 
 export class CanvasView {
   selectedId?: number;
+  showTrueLatentState = false;
   private readonly canvas: HTMLCanvasElement;
   private readonly world: World;
   private readonly perception: PerceptionHead;
@@ -142,9 +143,13 @@ export class CanvasView {
       const obs = this.perception.observe(selected, this.world.rng);
       const pred = this.perception.predict(obs);
       const trueVec = PROPERTY_KEYS.map((k) => `${k}: ${selected.props[k].toFixed(2)}`).join(', ');
+      const latent = selected.latentPrecision;
       selectedEl.innerHTML = [
         `selected: ${selected.id}`,
         `true: ${trueVec}`,
+        this.showTrueLatentState
+          ? `latent(debug): planarity=${latent.surface_planarity.toFixed(2)} impurity=${latent.impurity_level.toFixed(2)} order=${latent.microstructure_order.toFixed(2)} stress=${latent.internal_stress.toFixed(2)} resolution=${latent.feature_resolution_limit.toFixed(2)}`
+          : 'latent(debug): hidden',
         `perceived: length=${obs.observed_length.toFixed(2)} mass≈${obs.observed_mass_estimate.toFixed(2)} symmetry=${obs.visual_symmetry.toFixed(2)} contact≈${obs.contact_area_estimate.toFixed(2)} tex≈${obs.texture_proxy.toFixed(2)} feedback≈${obs.interaction_feedback_history.toFixed(2)}`,
         `pred hidden: hard=${pred.hardness.toFixed(2)} brit=${pred.brittleness.toFixed(2)} sharp=${pred.sharpness.toFixed(2)} ±${pred.uncertainty.toFixed(2)}`,
       ].join('<br/>');

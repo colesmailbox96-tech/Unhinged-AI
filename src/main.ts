@@ -69,6 +69,7 @@ let liveTrainingTimer: number | undefined;
 let livePaused = false;
 let liveFastForward = false;
 let liveLastRenderedTick = 0;
+let showTrueLatentState = false;
 const liveTimeline: import('./sim/milestones').MilestoneEvent[] = [];
 const liveMetricHistory: LiveTickResult[] = [];
 
@@ -87,6 +88,7 @@ function refresh(): void {
     recordedEpisode ? `recorded: seed=${recordedEpisode.seed} strategy=${recordedEpisode.strategy}` : 'recorded: none',
   ].join('<br/>');
   embeddingVizEl.innerHTML = renderEmbedding(lastEmbeddingSnapshot);
+  view.showTrueLatentState = showTrueLatentState;
   view.render(selectedEl, logEl);
 }
 
@@ -293,6 +295,8 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
   };
   const recent60 = windowAverages(60);
   const recent300 = windowAverages(300);
+  const latestMeasurement = result.measurements[0];
+  const latestGeometry = result.measurements.find((entry) => entry.kind === 'geometry');
   livePanel.setStatus(
     [
       `live t=${result.simTimeSeconds.toFixed(1)}s tick=${result.tick}`,
@@ -302,6 +306,20 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
       `composite 60s=${recent60.composite.toFixed(3)} 5m=${recent300.composite.toFixed(3)} clusters 60s=${recent60.clusters.toFixed(2)}`,
     ].join(' | '),
   );
+  livePanel.setManufacturingDashboard([
+    `station quality=${result.stationQuality.toFixed(3)} stations=${liveEngine.world.stations.size}`,
+    latestMeasurement
+      ? `mass CI=[${latestMeasurement.ciLow.toFixed(3)}, ${latestMeasurement.ciHigh.toFixed(3)}] σ=${latestMeasurement.sigma.toFixed(4)} n=${latestMeasurement.sampleCount}`
+      : 'mass CI: n/a',
+    latestGeometry && typeof latestGeometry.value === 'object'
+      ? `geometry: length=${latestGeometry.value.length.toFixed(3)} thickness=${latestGeometry.value.thickness.toFixed(3)} flatness=${latestGeometry.value.flatness.toFixed(3)}`
+      : 'geometry: n/a',
+    `repeatability score=${result.repeatabilityScore.toFixed(3)} precision score=${result.precisionScore.toFixed(3)}`,
+    result.controllerTarget
+      ? `controller ${result.controllerTarget.metric}: target=${result.controllerTarget.target.toFixed(3)} achieved=${result.controllerTarget.achieved.toFixed(3)}`
+      : 'controller: idle',
+    `object count=${liveEngine.world.objects.size}`,
+  ]);
   livePanel.setTimeline(liveTimeline);
   refresh();
 }
@@ -309,6 +327,7 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
 function startLiveMode(config: LiveModePanelConfig, livePanel: LiveModePanel): void {
   clearLiveTimers();
   liveConfig = config;
+  showTrueLatentState = config.showTrueLatentState;
   livePaused = false;
   liveFastForward = false;
   liveTimeline.length = 0;
@@ -322,6 +341,7 @@ function startLiveMode(config: LiveModePanelConfig, livePanel: LiveModePanel): v
   });
   world = liveEngine.world;
   view = new CanvasView(canvas, world, perception);
+  view.showTrueLatentState = showTrueLatentState;
   const startAt = performance.now();
   const maxRuntimeMs = config.runIndefinitely ? Number.POSITIVE_INFINITY : config.durationMinutes * 60_000;
   const simulationBatch = (): void => {

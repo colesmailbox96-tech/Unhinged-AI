@@ -15,6 +15,7 @@ export interface WorksetConfig {
   preferredSize: number;
   refreshTtlSec: number;
   stationRadius: number;
+  dropZoneOffsetX: number;
 }
 
 export const DEFAULT_WORKSET_CONFIG: WorksetConfig = {
@@ -23,13 +24,14 @@ export const DEFAULT_WORKSET_CONFIG: WorksetConfig = {
   preferredSize: 3,
   refreshTtlSec: 120,
   stationRadius: 1.1,
+  dropZoneOffsetX: 0.45,
 };
 
 export function createEmptyWorkset(): WorksetState {
   return { ids: [], ageSec: 0, pinned: false };
 }
 
-function nearestStation(world: World): { id: ObjID; dropZone: Vec2 } | undefined {
+function nearestStation(world: World, config: WorksetConfig): { id: ObjID; dropZone: Vec2 } | undefined {
   let best: { id: ObjID; dist: number; dropZone: Vec2 } | undefined;
   for (const station of world.stations.values()) {
     const dist = Math.hypot(world.agent.pos.x - station.worldPos.x, world.agent.pos.y - station.worldPos.y);
@@ -37,7 +39,7 @@ function nearestStation(world: World): { id: ObjID; dropZone: Vec2 } | undefined
       best = {
         id: station.objectId,
         dist,
-        dropZone: { x: Math.max(0, Math.min(world.width, station.worldPos.x + 0.45)), y: station.worldPos.y },
+        dropZone: { x: Math.max(0, Math.min(world.width, station.worldPos.x + config.dropZoneOffsetX)), y: station.worldPos.y },
       };
     }
   }
@@ -64,7 +66,7 @@ export function refreshWorkset(world: World, state: WorksetState, config: Workse
     }),
     ageSec: state.ageSec + Math.max(0, dtSec),
   };
-  const station = nearestStation(world);
+  const station = nearestStation(world, config);
   if (station) {
     next.homeStationId = station.id;
     next.dropZone = station.dropZone;

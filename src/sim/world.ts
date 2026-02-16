@@ -50,6 +50,8 @@ export interface PredictionRealityOverlay {
 }
 
 export class World {
+  private static readonly MAX_AGENT_STEP_DISTANCE = 0.65;
+  private static readonly MAX_PICKUP_DISTANCE = 2.5;
   readonly width = 10;
   readonly height = 10;
   readonly biomassResolution = 5;
@@ -219,7 +221,7 @@ export class World {
       const dx = tx - this.agent.pos.x;
       const dy = ty - this.agent.pos.y;
       const dist = Math.hypot(dx, dy);
-      const maxStep = 0.65;
+      const maxStep = World.MAX_AGENT_STEP_DISTANCE;
       const scale = dist > maxStep ? maxStep / Math.max(0.0001, dist) : 1;
       this.agent.pos.x += dx * scale;
       this.agent.pos.y += dy * scale;
@@ -233,7 +235,7 @@ export class World {
     if (action.type === 'PICK_UP') {
       const obj = this.getObject(action.objId);
       if (!obj) return;
-      if (Math.hypot(obj.pos.x - this.agent.pos.x, obj.pos.y - this.agent.pos.y) > 2.5) return;
+      if (Math.hypot(obj.pos.x - this.agent.pos.x, obj.pos.y - this.agent.pos.y) > World.MAX_PICKUP_DISTANCE) return;
       this.agent.heldObjectId = obj.id;
       obj.heldBy = this.agent.id;
       obj.pos = { ...this.agent.pos };

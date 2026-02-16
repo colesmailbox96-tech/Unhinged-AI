@@ -516,7 +516,7 @@ export class LiveModeEngine {
         const pickup = notAtStation[0] ?? worksetObjects[0];
         if (pickup) {
           const dist = Math.hypot(pickup.pos.x - this.world.agent.pos.x, pickup.pos.y - this.world.agent.pos.y);
-          if (dist <= 1.1) {
+          if (dist <= DEFAULT_WORKSET_CONFIG.stationRadius) {
             candidates.push({ verb: 'PICK_UP', objId: pickup.id, score: 0.8 });
             candidates.push({ verb: 'MOVE_TO', score: 0.75, intensity: 1, objId: pickup.id });
           } else {

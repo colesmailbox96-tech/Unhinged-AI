@@ -111,11 +111,12 @@ export function strike(tool: WorldObject, target: WorldObject, rng: RNG, nextId:
   const leverArm = Math.max(0.15, Math.hypot(tool.center_of_mass_offset.x - gripPoint.x, tool.center_of_mass_offset.y - gripPoint.y));
   const impactForce = impactPotential(tool.props, tool.length) * leverArm;
   const torque = impactForce * leverArm;
-  const inertia = Math.max(EPSILON, tool.props.mass * (tool.length * tool.length + tool.thickness * tool.thickness) / 12);
+  const inertiaShapeFactor = tool.shapeType === 'sphere' ? 0.4 : tool.shapeType === 'plate' ? 0.1 : tool.shapeType === 'shard' ? 0.12 : 1 / 12;
+  const inertia = Math.max(EPSILON, tool.props.mass * (tool.length * tool.length + tool.thickness * tool.thickness) * inertiaShapeFactor);
   const angularVelocity = Math.max(0, Math.min(6, (tool.angularVelocity ?? 0) + torque / inertia));
   tool.angularVelocity = angularVelocity;
-  const impactSurfaceSharpness = clamp(cuttingPotential(tool.props) + tool.props.sharpness * 0.2 + tool.grip_score * 0.1);
-  const damage = Math.max(0, angularVelocity * impactSurfaceSharpness * 0.35);
+  const effectiveCuttingPotential = clamp(cuttingPotential(tool.props) + tool.props.sharpness * 0.2 + tool.grip_score * 0.1);
+  const damage = Math.max(0, angularVelocity * effectiveCuttingPotential * 0.35);
   const threshold = 0.22 + target.integrity * 0.42 + target.props.elasticity * 0.18;
   const fractured = damage > threshold;
 

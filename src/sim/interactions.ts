@@ -249,7 +249,7 @@ export function soak(obj: WorldObject, intensity: number): WorldObject {
   const latent = latentOf(obj);
   const history = historyOf(obj);
   const scaled = clamp(intensity);
-  const porous = clamp(obj.props.roughness * 0.55 + (1 - obj.props.density) * 0.45);
+  const porous = clamp(obj.props.porosity * 0.7 + obj.props.roughness * 0.15 + (1 - obj.props.density) * 0.15);
   return {
     ...obj,
     props: {

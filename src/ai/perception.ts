@@ -16,10 +16,12 @@ export interface HiddenPrediction {
   hardness: number;
   brittleness: number;
   sharpness: number;
+  elasticity: number;
+  conductivity: number;
   uncertainty: number;
 }
 
-const targets: (keyof HiddenPrediction)[] = ['hardness', 'brittleness', 'sharpness'];
+const targets: (keyof Omit<HiddenPrediction, 'uncertainty'>)[] = ['hardness', 'brittleness', 'sharpness', 'elasticity', 'conductivity'];
 
 export class PerceptionHead {
   private readonly weights: number[][];
@@ -36,7 +38,7 @@ export class PerceptionHead {
       rng.range(-0.1, 0.1),
       rng.range(-0.1, 0.1),
     ]);
-    this.bias = [0, 0, 0];
+    this.bias = Array.from({ length: targets.length }, () => 0);
   }
 
   observe(obj: WorldObject, rng: RNG): Observation {
@@ -68,6 +70,8 @@ export class PerceptionHead {
       hardness: outputs[0],
       brittleness: outputs[1],
       sharpness: outputs[2],
+      elasticity: outputs[3] ?? 0,
+      conductivity: outputs[4] ?? 0,
       uncertainty: 1 / Math.sqrt(this.experience + 1),
     };
   }
@@ -81,9 +85,9 @@ export class PerceptionHead {
       obs.texture_proxy,
       obs.interaction_feedback_history,
     ];
-    const y = [truth.hardness, truth.brittleness, truth.sharpness];
+    const y = [truth.hardness, truth.brittleness, truth.sharpness, truth.elasticity, truth.conductivity];
     const pred = this.predict(obs);
-    const p = [pred.hardness, pred.brittleness, pred.sharpness];
+    const p = [pred.hardness, pred.brittleness, pred.sharpness, pred.elasticity, pred.conductivity];
     const scaledLr = lr * (0.3 + outcomeSignal * 0.7);
 
     for (let i = 0; i < this.weights.length; i++) {

@@ -95,3 +95,30 @@ export function fibrousTargetScore(props: PropertyVector): number {
     props.tensile_strength * 0.35 + props.elasticity * 0.25 + props.compressive_strength * 0.2 + lowBrittle * 0.2,
   );
 }
+
+/**
+ * Euclidean distance between two property vectors in normalized [0,1]^17 space.
+ * Useful for measuring material similarity.
+ */
+export function propertyDistance(a: PropertyVector, b: PropertyVector): number {
+  let sum = 0;
+  for (const key of PROPERTY_KEYS) {
+    const d = a[key] - b[key];
+    sum += d * d;
+  }
+  return Math.sqrt(sum);
+}
+
+/**
+ * Cosine similarity between two property vectors. Returns value in [-1, 1].
+ */
+export function propertySimilarity(a: PropertyVector, b: PropertyVector): number {
+  let dot = 0, magA = 0, magB = 0;
+  for (const key of PROPERTY_KEYS) {
+    dot += a[key] * b[key];
+    magA += a[key] * a[key];
+    magB += b[key] * b[key];
+  }
+  const denom = Math.sqrt(magA) * Math.sqrt(magB);
+  return denom > 0 ? dot / denom : 0;
+}

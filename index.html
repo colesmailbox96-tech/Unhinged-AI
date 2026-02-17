@@ -57,6 +57,13 @@
           <strong>Living Mode Status</strong>
           <div id="livingStatusContent"></div>
         </div>
+        <div style="margin-top:6px;border-top:1px solid #273248;padding-top:6px">
+          <strong>Persistence</strong><br/>
+          <button id="loadSnapshotBtn">Load Snapshot</button>
+          <input type="file" id="snapshotFileInput" accept=".json" style="display:none" />
+          <button id="determinismCheckBtn">Determinism Replay Check</button>
+          <div id="determinismResult" class="metric"></div>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

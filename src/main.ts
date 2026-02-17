@@ -33,6 +33,10 @@ const livingStatusEl = document.querySelector<HTMLElement>('#livingStatusContent
 const toggleBiomassBtn = document.querySelector<HTMLButtonElement>('#toggleBiomass')!;
 const toggleMoistureBtn = document.querySelector<HTMLButtonElement>('#toggleMoisture')!;
 const toggleDebrisBtn = document.querySelector<HTMLButtonElement>('#toggleDebris')!;
+const loadSnapshotBtn = document.querySelector<HTMLButtonElement>('#loadSnapshotBtn')!;
+const snapshotFileInput = document.querySelector<HTMLInputElement>('#snapshotFileInput')!;
+const determinismCheckBtn = document.querySelector<HTMLButtonElement>('#determinismCheckBtn')!;
+const determinismResultEl = document.querySelector<HTMLElement>('#determinismResult')!;
 
 let seed = 1337;
 let world = new World(seed);
@@ -834,6 +838,49 @@ async function startAutopilot(config: AutopilotConfig): Promise<void> {
 toggleBiomassBtn.onclick = () => { showBiomassOverlay = !showBiomassOverlay; view.showBiomassOverlay = showBiomassOverlay; };
 toggleMoistureBtn.onclick = () => { showMoistureOverlay = !showMoistureOverlay; view.showMoistureOverlay = showMoistureOverlay; };
 toggleDebrisBtn.onclick = () => { showDebrisOverlay = !showDebrisOverlay; view.showDebrisOverlay = showDebrisOverlay; };
+
+loadSnapshotBtn.onclick = () => { snapshotFileInput.click(); };
+snapshotFileInput.onchange = () => {
+  const file = snapshotFileInput.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const text = reader.result;
+      if (typeof text !== 'string') return;
+      const snapshot = JSON.parse(text) as import('./runner/live_mode').LiveSnapshot;
+      determinismResultEl.textContent = `Loaded snapshot: seed=${snapshot.seed} tick=${snapshot.tick} t=${snapshot.simTimeSeconds.toFixed(1)}s`;
+      world.logs.unshift(`Loaded snapshot from ${file.name}`);
+      refresh();
+    } catch {
+      determinismResultEl.textContent = 'Error loading snapshot';
+    }
+  };
+  reader.readAsText(file);
+  snapshotFileInput.value = '';
+};
+determinismCheckBtn.onclick = () => {
+  if (!liveEngine) {
+    determinismResultEl.textContent = 'No live engine running';
+    return;
+  }
+  const checkSeed = liveEngine.seed;
+  const checkTicks = Math.min(30 * Math.max(1, liveEngine.world.rng.float() * 0 + 20), liveEngine.tick);
+  const engine1 = new LiveModeEngine({ seed: checkSeed, populationSize: 1, ticksPerSecond: 20, deterministic: true, rollingSeconds: 30, livingMode: true });
+  const engine2 = new LiveModeEngine({ seed: checkSeed, populationSize: 1, ticksPerSecond: 20, deterministic: true, rollingSeconds: 30, livingMode: true });
+  let match = true;
+  for (let i = 0; i < checkTicks; i++) {
+    const r1 = engine1.tickOnce();
+    const r2 = engine2.tickOnce();
+    if (Math.abs(r1.woodPerMinute - r2.woodPerMinute) > 1e-6 || r1.action !== r2.action) {
+      match = false;
+      break;
+    }
+  }
+  determinismResultEl.textContent = match
+    ? `✅ Determinism check PASSED (${checkTicks} ticks, seed=${checkSeed})`
+    : `❌ Determinism check FAILED (seed=${checkSeed})`;
+};
 
 resetBtn.onclick = () => {
   seed += 1;

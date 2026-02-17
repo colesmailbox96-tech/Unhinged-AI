@@ -55,7 +55,8 @@ const ACTION_FATIGUE_COST: Record<string, number> = {
   REST: -0.03, // negative = recovery
 };
 
-const ACTION_ENERGY_COST_NEEDS: Record<string, number> = {
+/** Energy cost per action (for needs system) */
+const NEEDS_ENERGY_COST: Record<string, number> = {
   STRIKE_WITH: 0.025,
   GRIND: 0.02,
   BIND_TO: 0.015,
@@ -83,7 +84,7 @@ export function tickNeeds(
   action: string,
   cfg: NeedsConfig = DEFAULT_NEEDS_CONFIG,
 ): { needs: AgentNeeds; alive: boolean } {
-  const energyCost = (ACTION_ENERGY_COST_NEEDS[action] ?? 0.01) + cfg.energyDecayPerTick;
+  const energyCost = (NEEDS_ENERGY_COST[action] ?? 0.01) + cfg.energyDecayPerTick;
   const fatigueCost = ACTION_FATIGUE_COST[action] ?? 0;
 
   const updated: AgentNeeds = {

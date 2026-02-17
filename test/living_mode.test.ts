@@ -49,7 +49,7 @@ describe('Living Mode - Needs & Metabolism', () => {
   });
 
   it('agent dies when energy depleted', () => {
-    let needs = createDefaultNeeds();
+    const needs = createDefaultNeeds();
     needs.energy = 0.04;
     const result = tickNeeds(needs, 'STRIKE_WITH');
     expect(result.alive).toBe(false);

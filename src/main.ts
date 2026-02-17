@@ -849,8 +849,8 @@ snapshotFileInput.onchange = () => {
       const text = reader.result;
       if (typeof text !== 'string') return;
       const snapshot = JSON.parse(text) as import('./runner/live_mode').LiveSnapshot;
-      determinismResultEl.textContent = `Loaded snapshot: seed=${snapshot.seed} tick=${snapshot.tick} t=${snapshot.simTimeSeconds.toFixed(1)}s`;
-      world.logs.unshift(`Loaded snapshot from ${file.name}`);
+      determinismResultEl.textContent = `Loaded snapshot: seed=${snapshot.seed} tick=${snapshot.tick} t=${snapshot.simTimeSeconds.toFixed(1)}s objects=${snapshot.world.objects.length} agents=${snapshot.agents.length}`;
+      world.logs.unshift(`Loaded snapshot from ${file.name}: seed=${snapshot.seed}, tick=${snapshot.tick}, wood=${snapshot.world.woodGained.toFixed(2)}, regime=${snapshot.manufacturing.regime}`);
       refresh();
     } catch {
       determinismResultEl.textContent = 'Error loading snapshot';

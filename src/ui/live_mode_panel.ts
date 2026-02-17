@@ -13,6 +13,7 @@ export interface LiveModePanelConfig {
   renderEveryNTicks: number;
   rollingSeconds: number;
   showTrueLatentState: boolean;
+  livingMode: boolean;
 }
 
 export interface LiveModePanelHandlers {
@@ -57,6 +58,7 @@ export class LiveModePanel {
            <label><input data-live="showLatentDebug" type="checkbox" /> Show true latent state (debug)</label>
            <label><input data-live="pinWorkset" type="checkbox" /> Pin workset</label>
            <label><input data-live="showWorkset" type="checkbox" checked /> Show workset</label>
+           <label><input data-live="livingMode" type="checkbox" checked /> Living Mode</label>
          </div>
         <div style="margin-top:6px">
           <button data-live="start">Start Live</button>
@@ -127,6 +129,7 @@ export class LiveModePanel {
       renderEveryNTicks: Math.max(1, Number((this.element.querySelector('[data-live="renderEvery"]') as HTMLInputElement).value) || 5),
       rollingSeconds: Math.max(5, Number((this.element.querySelector('[data-live="rollingSeconds"]') as HTMLInputElement).value) || 30),
       showTrueLatentState: (this.element.querySelector('[data-live="showLatentDebug"]') as HTMLInputElement).checked,
+      livingMode: (this.element.querySelector('[data-live="livingMode"]') as HTMLInputElement).checked,
     };
   }
 

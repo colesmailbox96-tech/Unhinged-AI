@@ -27,6 +27,16 @@ const replayEpisodeBtn = document.querySelector<HTMLButtonElement>('#replayEpiso
 const disablePredictionBtn = document.querySelector<HTMLButtonElement>('#disablePredictionBtn')!;
 const realityCheckStatsEl = document.querySelector<HTMLElement>('#realityCheckStats')!;
 const embeddingVizEl = document.querySelector<HTMLElement>('#embeddingViz')!;
+const rewardBreakdownEl = document.querySelector<HTMLElement>('#rewardBreakdownContent')!;
+const agentInspectorEl = document.querySelector<HTMLElement>('#agentInspectorContent')!;
+const livingStatusEl = document.querySelector<HTMLElement>('#livingStatusContent')!;
+const toggleBiomassBtn = document.querySelector<HTMLButtonElement>('#toggleBiomass')!;
+const toggleMoistureBtn = document.querySelector<HTMLButtonElement>('#toggleMoisture')!;
+const toggleDebrisBtn = document.querySelector<HTMLButtonElement>('#toggleDebris')!;
+const loadSnapshotBtn = document.querySelector<HTMLButtonElement>('#loadSnapshotBtn')!;
+const snapshotFileInput = document.querySelector<HTMLInputElement>('#snapshotFileInput')!;
+const determinismCheckBtn = document.querySelector<HTMLButtonElement>('#determinismCheckBtn')!;
+const determinismResultEl = document.querySelector<HTMLElement>('#determinismResult')!;
 
 let seed = 1337;
 let world = new World(seed);
@@ -72,6 +82,9 @@ let liveFastForward = false;
 let liveLastRenderedTick = 0;
 let showTrueLatentState = false;
 let showWorksetOverlay = true;
+let showBiomassOverlay = false;
+let showMoistureOverlay = false;
+let showDebrisOverlay = false;
 const liveTimeline: import('./sim/milestones').MilestoneEvent[] = [];
 const liveMetricHistory: LiveTickResult[] = [];
 let evolutionRunning = false;
@@ -347,6 +360,35 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
     `object count=${liveEngine.world.objects.size} despawnByReason=${Object.entries(result.despawnByReason).map(([k, v]) => `${k}:${v}`).join(',') || 'none'}`,
   ]);
   livePanel.setTimeline(liveTimeline);
+  // Living Mode UI updates
+  if (result.livingMode) {
+    if (result.rewardBreakdown) {
+      const rb = result.rewardBreakdown;
+      rewardBreakdownEl.innerHTML = [
+        `<b>Top 3:</b> ${rb.topContributors.map(c => `${c.name}=${c.value.toFixed(3)}`).join(', ')}`,
+        `total=${rb.components.total.toFixed(3)} ema=${rb.ema.total.toFixed(3)}`,
+        `survival=${rb.components.survival.toFixed(3)} food=${rb.components.foodIntake.toFixed(3)} water=${rb.components.waterIntake.toFixed(3)}`,
+        `novelty=${rb.components.novelty.toFixed(3)} predErr=${rb.components.predictionError.toFixed(3)} skill=${rb.components.skillDiscovery.toFixed(3)}`,
+        `spam=${rb.components.spamPenalty.toFixed(3)} repeat=${rb.components.repeatPenalty.toFixed(3)} idle=${rb.components.idlePenalty.toFixed(3)}`,
+      ].join('<br/>');
+    }
+    if (result.agentNeeds) {
+      const n = result.agentNeeds;
+      livingStatusEl.innerHTML = [
+        `energy=${n.energy.toFixed(2)} hydration=${n.hydration.toFixed(2)} temp=${n.temperature.toFixed(2)}`,
+        `damage=${n.damage.toFixed(2)} fatigue=${n.fatigue.toFixed(2)}`,
+        `intent=${result.agentIntent} drivers=[${(result.agentIntentDrivers ?? []).join(', ')}]`,
+        result.skillMetrics ? `skills: owned=${result.skillMetrics.ownedSkills} total=${result.skillMetrics.totalSkills}` : '',
+        result.skillMetrics?.recentDiscoveries.length ? `recent: ${result.skillMetrics.recentDiscoveries.slice(-3).join(', ')}` : '',
+        `repeatPenalty=${result.repeatPenalty.toFixed(3)} waterSources=${result.waterSources}`,
+      ].join('<br/>');
+    }
+    agentInspectorEl.innerHTML = [
+      `action=${result.action} intent=${result.agentIntent}`,
+      result.agentIntentDrivers ? `why: ${result.agentIntentDrivers.join(', ')}` : '',
+      `predErr=${result.predictionErrorMean.toFixed(3)} regime=${result.regime}`,
+    ].join('<br/>');
+  }
   refresh();
 }
 
@@ -364,6 +406,7 @@ function startLiveMode(config: LiveModePanelConfig, livePanel: LiveModePanel): v
     ticksPerSecond: config.ticksPerSecond,
     deterministic: config.deterministic,
     rollingSeconds: config.rollingSeconds,
+    livingMode: config.livingMode,
   });
   world = liveEngine.world;
   view = new CanvasView(canvas, world, perception);
@@ -478,6 +521,7 @@ function startEvolution(config: EvolutionPanelConfig): void {
     renderEveryNTicks: 8,
     rollingSeconds: 60,
     showTrueLatentState: false,
+    livingMode: false,
   };
   liveConfig = evoDefaults;
   liveEngine = new LiveModeEngine({
@@ -790,6 +834,53 @@ async function startAutopilot(config: AutopilotConfig): Promise<void> {
     autopilotCancelRequested = false;
   }
 }
+
+toggleBiomassBtn.onclick = () => { showBiomassOverlay = !showBiomassOverlay; view.showBiomassOverlay = showBiomassOverlay; };
+toggleMoistureBtn.onclick = () => { showMoistureOverlay = !showMoistureOverlay; view.showMoistureOverlay = showMoistureOverlay; };
+toggleDebrisBtn.onclick = () => { showDebrisOverlay = !showDebrisOverlay; view.showDebrisOverlay = showDebrisOverlay; };
+
+loadSnapshotBtn.onclick = () => { snapshotFileInput.click(); };
+snapshotFileInput.onchange = () => {
+  const file = snapshotFileInput.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const text = reader.result;
+      if (typeof text !== 'string') return;
+      const snapshot = JSON.parse(text) as import('./runner/live_mode').LiveSnapshot;
+      determinismResultEl.textContent = `Loaded snapshot: seed=${snapshot.seed} tick=${snapshot.tick} t=${snapshot.simTimeSeconds.toFixed(1)}s objects=${snapshot.world.objects.length} agents=${snapshot.agents.length}`;
+      world.logs.unshift(`Loaded snapshot from ${file.name}: seed=${snapshot.seed}, tick=${snapshot.tick}, wood=${snapshot.world.woodGained.toFixed(2)}, regime=${snapshot.manufacturing.regime}`);
+      refresh();
+    } catch {
+      determinismResultEl.textContent = 'Error loading snapshot';
+    }
+  };
+  reader.readAsText(file);
+  snapshotFileInput.value = '';
+};
+determinismCheckBtn.onclick = () => {
+  if (!liveEngine) {
+    determinismResultEl.textContent = 'No live engine running';
+    return;
+  }
+  const checkSeed = liveEngine.seed;
+  const checkTicks = Math.min(30 * Math.max(1, liveEngine.world.rng.float() * 0 + 20), liveEngine.tick);
+  const engine1 = new LiveModeEngine({ seed: checkSeed, populationSize: 1, ticksPerSecond: 20, deterministic: true, rollingSeconds: 30, livingMode: true });
+  const engine2 = new LiveModeEngine({ seed: checkSeed, populationSize: 1, ticksPerSecond: 20, deterministic: true, rollingSeconds: 30, livingMode: true });
+  let match = true;
+  for (let i = 0; i < checkTicks; i++) {
+    const r1 = engine1.tickOnce();
+    const r2 = engine2.tickOnce();
+    if (Math.abs(r1.woodPerMinute - r2.woodPerMinute) > 1e-6 || r1.action !== r2.action) {
+      match = false;
+      break;
+    }
+  }
+  determinismResultEl.textContent = match
+    ? `✅ Determinism check PASSED (${checkTicks} ticks, seed=${checkSeed})`
+    : `❌ Determinism check FAILED (seed=${checkSeed})`;
+};
 
 resetBtn.onclick = () => {
   seed += 1;

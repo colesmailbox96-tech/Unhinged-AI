@@ -15,6 +15,9 @@ export interface PropertyVector {
   heat_capacity: number;
   combustibility: number;
   toxicity: number;
+  conductivity: number;
+  malleability: number;
+  porosity: number;
 }
 
 export const PROPERTY_KEYS: (keyof PropertyVector)[] = [
@@ -32,6 +35,9 @@ export const PROPERTY_KEYS: (keyof PropertyVector)[] = [
   'heat_capacity',
   'combustibility',
   'toxicity',
+  'conductivity',
+  'malleability',
+  'porosity',
 ];
 
 export const EPSILON = 1e-6;

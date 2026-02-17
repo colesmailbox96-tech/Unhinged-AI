@@ -27,6 +27,9 @@ function baseProps(overrides: Partial<PropertyVector> = {}): PropertyVector {
     heat_capacity: 0.5,
     combustibility: 0.3,
     toxicity: 0.1,
+    conductivity: 0.3,
+    malleability: 0.4,
+    porosity: 0.35,
     ...overrides,
   };
 }

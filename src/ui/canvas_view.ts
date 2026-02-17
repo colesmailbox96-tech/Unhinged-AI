@@ -9,6 +9,9 @@ export class CanvasView {
   showWorkset = true;
   agentIntent = 'idle';
   agentTargetId?: number;
+  showBiomassOverlay = false;
+  showMoistureOverlay = false;
+  showDebrisOverlay = false;
   private readonly canvas: HTMLCanvasElement;
   private readonly world: World;
   private readonly perception: PerceptionHead;
@@ -43,6 +46,31 @@ export class CanvasView {
 
     const sx = this.canvas.width / this.world.width;
     const sy = this.canvas.height / this.world.height;
+
+    // Heatmap overlays
+    if (this.showBiomassOverlay) {
+      for (let gy = 0; gy < this.world.biomassResolution; gy++) {
+        for (let gx = 0; gx < this.world.biomassResolution; gx++) {
+          const val = this.world.biomass[gy]?.[gx] ?? 1;
+          const cellW = this.canvas.width / this.world.biomassResolution;
+          const cellH = this.canvas.height / this.world.biomassResolution;
+          ctx.fillStyle = `rgba(34,139,34,${(val * 0.35).toFixed(2)})`;
+          ctx.fillRect(gx * cellW, gy * cellH, cellW, cellH);
+        }
+      }
+    }
+    if (this.showDebrisOverlay) {
+      for (const obj of this.world.objects.values()) {
+        if (obj.debugFamily === 'fragment') {
+          const x = obj.pos.x * sx;
+          const y = obj.pos.y * sy;
+          ctx.fillStyle = 'rgba(255,100,100,0.25)';
+          ctx.beginPath();
+          ctx.arc(x, y, 8, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
 
     if (this.world.lastStrikeArc && this.world.lastStrikeArc.alpha > 0.02) {
       const arc = this.world.lastStrikeArc;

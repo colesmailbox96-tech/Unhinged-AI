@@ -36,9 +36,27 @@
           <div id="realityCheckStats" class="metric"></div>
           <div id="embeddingViz" class="metric"></div>
         </div>
+        <div style="margin-top:6px;border-top:1px solid #273248;padding-top:6px">
+          <strong>Overlays</strong><br/>
+          <button id="toggleBiomass">Biomass</button>
+          <button id="toggleMoisture">Moisture</button>
+          <button id="toggleDebris">Debris</button>
+        </div>
         <div id="metrics" class="metric"></div>
         <div id="selected" class="metric"></div>
         <pre id="log"></pre>
+        <div id="rewardBreakdown" class="metric" style="max-height:180px;overflow:auto;border-top:1px solid #273248;padding-top:6px">
+          <strong>Reward Breakdown</strong>
+          <div id="rewardBreakdownContent"></div>
+        </div>
+        <div id="agentInspector" class="metric" style="max-height:180px;overflow:auto;border-top:1px solid #273248;padding-top:6px">
+          <strong>Agent Inspector</strong>
+          <div id="agentInspectorContent"></div>
+        </div>
+        <div id="livingStatus" class="metric" style="max-height:140px;overflow:auto;border-top:1px solid #273248;padding-top:6px">
+          <strong>Living Mode Status</strong>
+          <div id="livingStatusContent"></div>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

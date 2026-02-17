@@ -324,6 +324,12 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
   const recent300 = windowAverages(300);
   const latestMeasurement = result.measurements[0];
   const latestGeometry = result.measurements.find((entry) => entry.kind === 'geometry');
+  const structureFunctionLine = (() => {
+    if (!world.stations.size) return 'structure functions=none';
+    const counts = { storage: 0, workshop: 0, purifier: 0, beacon: 0 };
+    for (const station of world.stations.values()) counts[station.functionType] += 1;
+    return `structure functions=storage:${counts.storage} workshop:${counts.workshop} purifier:${counts.purifier} beacon:${counts.beacon}`;
+  })();
   livePanel.setStatus(
     [
       `live t=${result.simTimeSeconds.toFixed(1)}s tick=${result.tick} regime=${result.regime} (${result.timeInRegime.toFixed(1)}s)`,
@@ -346,9 +352,7 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
     `embedding clusters=${result.embeddingClusters} windowN=${result.embeddingsInWindow}`,
     `station quality=${result.stationQuality.toFixed(3)} activeStation=${result.activeStationId ?? 'n/a'} activeQ=${result.activeStationQuality.toFixed(3)} dist=${(result.distanceToActiveStation ?? 0).toFixed(2)}`,
     `stations=${result.stationQualities.map((entry) => `${entry.id}:${entry.quality.toFixed(3)}`).join(', ') || 'none'}`,
-    world.stations.size
-      ? `structure functions=${['storage', 'workshop', 'purifier', 'beacon'].map((fn) => `${fn}:${[...world.stations.values()].filter((station) => station.functionType === fn).length}`).join(' ')}`
-      : 'structure functions=none',
+    structureFunctionLine,
     `duty=${result.dutyMode} lab=${result.dutyCycleLab.toFixed(2)} world=${result.dutyCycleWorld.toFixed(2)} timeInRegime=${result.timeInRegime.toFixed(1)}s`,
     `workset size=${result.worksetSize} age=${result.worksetAgeSec.toFixed(1)}s home=${result.worksetHomeStationId ?? 'n/a'} atStation=${result.worksetAtStationFraction.toFixed(2)} avgDist=${result.avgDistanceToStation.toFixed(2)}`,
     `haul trips/min=${result.haulTripsPerMin.toFixed(2)} ids=[${result.worksetIds.join(',')}]`,

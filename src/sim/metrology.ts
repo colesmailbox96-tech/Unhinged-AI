@@ -22,6 +22,20 @@ interface RunningStats {
 }
 
 const measurementStats = new Map<string, RunningStats>();
+const MEASUREMENT_STATS_CAPACITY = 2000;
+
+function evictStaleStats(): void {
+  if (measurementStats.size <= MEASUREMENT_STATS_CAPACITY) return;
+  // Remove entries with lowest sample counts first
+  const entries = [...measurementStats.entries()].sort((a, b) => a[1].count - b[1].count);
+  const toRemove = entries.slice(0, entries.length - MEASUREMENT_STATS_CAPACITY);
+  for (const [key] of toRemove) measurementStats.delete(key);
+}
+
+/** Reset all accumulated measurement statistics. */
+export function resetMeasurementStats(): void {
+  measurementStats.clear();
+}
 
 function keyFor(kind: MeasurementKind, objId: number, instrumentId?: number): string {
   return `${kind}:${objId}:${instrumentId ?? 0}`;
@@ -52,6 +66,7 @@ function summarize(kind: MeasurementKind, raw: number, objId: number, sigmaBase:
   const key = keyFor(kind, objId, instrumentId);
   const next = updateStats(measurementStats.get(key) ?? { count: 0, mean: 0, m2: 0 }, raw);
   measurementStats.set(key, next);
+  evictStaleStats();
   const sampleVariance = next.count > 1 ? next.m2 / (next.count - 1) : sigmaBase ** 2;
   const standardError = Math.max(minSigma, Math.sqrt(sampleVariance / Math.max(1, next.count)));
   const ci = 1.96 * standardError;

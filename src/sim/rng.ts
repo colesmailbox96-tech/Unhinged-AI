@@ -43,8 +43,25 @@ export class RNG {
     return mean + z0 * stdDev;
   }
 
+  /** Pick a random element from the array. Returns undefined for empty arrays. */
+  pick<T>(arr: readonly T[]): T | undefined {
+    if (arr.length === 0) return undefined;
+    return arr[this.int(0, arr.length)];
+  }
+
+  /** Return a shuffled copy of the array (Fisher-Yates). */
+  shuffle<T>(arr: readonly T[]): T[] {
+    const out = [...arr];
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = this.int(0, i + 1);
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+    return out;
+  }
+
   clone(): RNG {
-    const rng = new RNG(this.state);
+    const rng = new RNG(1); // dummy seed, overwritten below
+    rng.state = this.state;
     rng.spareNormal = this.spareNormal;
     return rng;
   }

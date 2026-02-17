@@ -5,6 +5,7 @@ import { fibrousTargetScore } from './properties';
 import { RNG } from './rng';
 import { type MeasurementResult, measureConductivity, measureGeometry, measureHardness, measureMass, measureOptical } from './metrology';
 import { anchorObject, stationFromAnchoredObject, type AnchoredStation, type StationFunction } from './stations';
+import { SpatialGrid } from './spatial_grid';
 
 export type PrimitiveVerb =
   | { type: 'MOVE_TO'; x: number; y: number }
@@ -53,12 +54,14 @@ export class World {
   private static readonly MAX_AGENT_STEP_DISTANCE = 0.65;
   private static readonly MAX_PICKUP_DISTANCE = 2.5;
   private static readonly MAX_STRUCTURE_TILES = 14;
+  private static readonly MAX_LOG_ENTRIES = 200;
   readonly width = 10;
   readonly height = 10;
   readonly biomassResolution = 5;
   readonly rng: RNG;
   readonly objects = new Map<ObjID, WorldObject>();
   readonly logs: string[] = [];
+  readonly spatialGrid = new SpatialGrid<WorldObject>(2.5);
   lastStrikeArc?: StrikeArc;
   predictedStrikeArc?: StrikeArc;
   predictedStrikeDamage?: number;
@@ -99,6 +102,7 @@ export class World {
 
   initialize(): void {
     this.objects.clear();
+    this.spatialGrid.clear();
     this.logs.length = 0;
     this.woodGained = 0;
     this.lastStrikeArc = undefined;
@@ -201,7 +205,7 @@ export class World {
       Partial<Pick<WorldObject, 'latentPrecision' | 'processHistory'>>,
   ): ObjID {
     const id = this.nextObjectId++;
-    this.objects.set(id, {
+    const obj: WorldObject = {
       ...input,
       id,
       vel: { x: 0, y: 0 },
@@ -218,7 +222,9 @@ export class World {
         thermal_cycles: 0,
         soak_cycles: 0,
       },
-    });
+    };
+    this.objects.set(id, obj);
+    this.spatialGrid.upsert(obj);
     return id;
   }
 
@@ -236,18 +242,16 @@ export class World {
   }
 
   getNearbyObjectIds(radius = 2.5): ObjID[] {
-    const out: ObjID[] = [];
-    for (const obj of this.objects.values()) {
-      const dx = obj.pos.x - this.agent.pos.x;
-      const dy = obj.pos.y - this.agent.pos.y;
-      if (Math.hypot(dx, dy) <= radius) out.push(obj.id);
-    }
-    return out;
+    return this.spatialGrid
+      .queryRadius(this.agent.pos.x, this.agent.pos.y, radius)
+      .map(obj => obj.id);
   }
 
   apply(action: PrimitiveVerb): void {
     this.lastInteractionOutcome = undefined;
+    this.trimLogs();
     if (action.type === 'MOVE_TO') {
+      if (!Number.isFinite(action.x) || !Number.isFinite(action.y)) return;
       const tx = Math.max(0, Math.min(this.width, action.x));
       const ty = Math.max(0, Math.min(this.height, action.y));
       const dx = tx - this.agent.pos.x;
@@ -259,7 +263,10 @@ export class World {
       this.agent.pos.y += dy * scale;
       if (this.agent.heldObjectId) {
         const held = this.getObject(this.agent.heldObjectId);
-        if (held) held.pos = { ...this.agent.pos };
+        if (held) {
+          held.pos = { ...this.agent.pos };
+          this.spatialGrid.upsert(held);
+        }
       }
       return;
     }
@@ -293,8 +300,11 @@ export class World {
       const result = bindObjects(held, other, this.nextObjectId++, this.rng);
       result.composite.heldBy = this.agent.id;
       this.objects.delete(held.id);
+      this.spatialGrid.remove(held.id);
       this.objects.delete(other.id);
+      this.spatialGrid.remove(other.id);
       this.objects.set(result.composite.id, result.composite);
+      this.spatialGrid.upsert(result.composite);
       this.agent.heldObjectId = result.composite.id;
       this.logs.unshift(`BIND ${held.id}+${other.id} -> ${result.composite.id} (q=${result.bindingQuality.toFixed(2)})`);
       this.lastInteractionOutcome = {
@@ -327,13 +337,17 @@ export class World {
       };
       if (result.fractured) {
         const localBiomass = this.consumeBiomassAt(target.pos.x, target.pos.y, 0.22);
-        for (const fragment of result.fragments) this.objects.set(fragment.id, fragment);
+        for (const fragment of result.fragments) {
+          this.objects.set(fragment.id, fragment);
+          this.spatialGrid.upsert(fragment);
+        }
         const distanceFromCenter = Math.hypot(target.pos.x - this.width * 0.5, target.pos.y - this.height * 0.5) / Math.max(1, this.width * 0.7);
         const travelYieldBoost = 1 + Math.max(0, distanceFromCenter) * 0.25;
         const woodYield = Math.round(localBiomass * travelYieldBoost * 1000) / 1000;
         this.woodGained += woodYield;
         this.logs.unshift(`STRIKE ${tool.id} -> target ${target.id} dmg=${result.damage.toFixed(2)} wood+${woodYield.toFixed(2)}`);
         this.objects.delete(target.id);
+        this.spatialGrid.remove(target.id);
         this.spawnTarget();
       } else {
         this.logs.unshift(`STRIKE ${tool.id} -> target ${target.id} dmg=${result.damage.toFixed(2)}`);
@@ -377,6 +391,7 @@ export class World {
 
     if (action.type === 'HEAT') {
       if (!this.agent.heldObjectId) return;
+      if (!Number.isFinite(action.intensity)) return;
       const held = this.getObject(this.agent.heldObjectId);
       if (!held) return;
       const updated = heat(held, action.intensity);
@@ -388,6 +403,7 @@ export class World {
 
     if (action.type === 'SOAK') {
       if (!this.agent.heldObjectId) return;
+      if (!Number.isFinite(action.intensity)) return;
       const held = this.getObject(this.agent.heldObjectId);
       if (!held) return;
       const updated = soak(held, action.intensity);
@@ -399,6 +415,7 @@ export class World {
 
     if (action.type === 'COOL') {
       if (!this.agent.heldObjectId) return;
+      if (!Number.isFinite(action.intensity)) return;
       const held = this.getObject(this.agent.heldObjectId);
       if (!held) return;
       const updated = cool(held, action.intensity);
@@ -434,6 +451,12 @@ export class World {
       this.stationFootprint.set(anchored.id, 1 + this.stations.size * 0.08);
       this.logs.unshift(`ANCHOR ${held.id} q=${station.quality.toFixed(2)} fn=${station.functionType}`);
       return;
+    }
+  }
+
+  private trimLogs(): void {
+    if (this.logs.length > World.MAX_LOG_ENTRIES) {
+      this.logs.length = World.MAX_LOG_ENTRIES;
     }
   }
 
@@ -616,6 +639,24 @@ export class World {
   structureSupportLogistics(): number {
     const storageCount = [...this.stations.values()].filter((entry) => entry.functionType === 'storage').length;
     return Math.min(0.5, storageCount * 0.08);
+  }
+
+  /**
+   * Apply slow weathering to all non-anchored objects.
+   * Objects gradually lose integrity and surface quality over time,
+   * simulating environmental wear. Anchored objects and held objects
+   * weather at a reduced rate.
+   */
+  weatherObjects(tickDelta = 1): void {
+    const baseDecay = 0.0002 * tickDelta;
+    for (const obj of this.objects.values()) {
+      obj.ageTicks = (obj.ageTicks ?? 0) + tickDelta;
+      if (obj.anchored || obj.heldBy !== undefined) continue; // sheltered objects don't weather
+      const moistureEffect = this.moistureAt(obj.pos.x, obj.pos.y);
+      const weatherRate = baseDecay * (1 + moistureEffect * 0.5 + obj.props.porosity * 0.3);
+      obj.integrity = Math.max(0.01, obj.integrity - weatherRate);
+      obj.latentPrecision.surface_planarity = Math.max(0, obj.latentPrecision.surface_planarity - weatherRate * 0.3);
+    }
   }
 
   private chooseStationFunction(worldPos: { x: number; y: number }): StationFunction {

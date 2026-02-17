@@ -41,6 +41,10 @@ export interface WorldObject {
   anchored?: boolean;
   latentPrecision: LatentPrecisionState;
   processHistory: ProcessHistoryState;
+  /** Tick at which this object was created. */
+  createdAtTick?: number;
+  /** Accumulated age in ticks (incremented by weathering). */
+  ageTicks?: number;
 }
 
 export function deriveGripScore(shapeType: ShapeType, length: number, thickness: number, roughness: number): number {

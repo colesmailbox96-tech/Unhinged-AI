@@ -4,7 +4,7 @@ import { fibrousTargetProps, materialDistributions, sampleProperties } from './m
 import { fibrousTargetScore } from './properties';
 import { RNG } from './rng';
 import { type MeasurementResult, measureConductivity, measureGeometry, measureHardness, measureMass, measureOptical } from './metrology';
-import { anchorObject, stationFromAnchoredObject, type AnchoredStation } from './stations';
+import { anchorObject, stationFromAnchoredObject, type AnchoredStation, type StationFunction } from './stations';
 
 export type PrimitiveVerb =
   | { type: 'MOVE_TO'; x: number; y: number }
@@ -52,6 +52,7 @@ export interface PredictionRealityOverlay {
 export class World {
   private static readonly MAX_AGENT_STEP_DISTANCE = 0.65;
   private static readonly MAX_PICKUP_DISTANCE = 2.5;
+  private static readonly MAX_STRUCTURE_TILES = 14;
   readonly width = 10;
   readonly height = 10;
   readonly biomassResolution = 5;
@@ -68,14 +69,31 @@ export class World {
   nextObjectId = 1;
   woodGained = 0;
   readonly stations = new Map<ObjID, AnchoredStation>();
+  readonly stationDurability = new Map<ObjID, number>();
+  readonly stationFootprint = new Map<ObjID, number>();
   readonly lastMeasurements = new Map<ObjID, MeasurementResult[]>();
   readonly biomass: number[][];
+  readonly biomassCapacity: number[][];
+  readonly biomassCooldown: number[][];
+  readonly harvestPressure: number[][];
+  readonly moisture: number[][];
+  readonly moistureCapacity: number[][];
+  readonly waterSources: Array<{ x: number; y: number }> = [
+    { x: 1.6, y: 1.8 },
+    { x: 8.1, y: 2.4 },
+    { x: 7.2, y: 8.2 },
+  ];
   worksetDebugIds: ObjID[] = [];
   worksetDropZone?: { x: number; y: number };
 
   constructor(seed: number) {
     this.rng = new RNG(seed);
     this.biomass = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 1));
+    this.biomassCapacity = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 1));
+    this.biomassCooldown = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 0));
+    this.harvestPressure = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 0));
+    this.moisture = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 0.2));
+    this.moistureCapacity = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 1));
     this.initialize();
   }
 
@@ -91,11 +109,25 @@ export class World {
     this.lastInteractionOutcome = undefined;
     this.nextObjectId = 1;
     this.stations.clear();
+    this.stationDurability.clear();
+    this.stationFootprint.clear();
     this.lastMeasurements.clear();
     this.agent.pos = { x: 5, y: 5 };
     this.agent.heldObjectId = undefined;
     this.agent.energy = 1;
-    for (const row of this.biomass) row.fill(1);
+    for (let gy = 0; gy < this.biomassResolution; gy++) {
+      for (let gx = 0; gx < this.biomassResolution; gx++) {
+        const cx = (gx + 0.5) / this.biomassResolution;
+        const cy = (gy + 0.5) / this.biomassResolution;
+        const centerFalloff = Math.min(1, Math.hypot(cx - 0.5, cy - 0.5) * 1.4);
+        const carryingCap = 0.58 + centerFalloff * 0.55;
+        this.biomassCapacity[gy][gx] = carryingCap;
+        this.biomass[gy][gx] = carryingCap;
+        this.biomassCooldown[gy][gx] = 0;
+        this.harvestPressure[gy][gx] = 0;
+      }
+    }
+    this.seedMoistureField();
 
     for (let i = 0; i < 10; i++) {
       const d = materialDistributions[i % materialDistributions.length];
@@ -296,7 +328,9 @@ export class World {
       if (result.fractured) {
         const localBiomass = this.consumeBiomassAt(target.pos.x, target.pos.y, 0.22);
         for (const fragment of result.fragments) this.objects.set(fragment.id, fragment);
-        const woodYield = Math.round(localBiomass * 1000) / 1000;
+        const distanceFromCenter = Math.hypot(target.pos.x - this.width * 0.5, target.pos.y - this.height * 0.5) / Math.max(1, this.width * 0.7);
+        const travelYieldBoost = 1 + Math.max(0, distanceFromCenter) * 0.25;
+        const woodYield = Math.round(localBiomass * travelYieldBoost * 1000) / 1000;
         this.woodGained += woodYield;
         this.logs.unshift(`STRIKE ${tool.id} -> target ${target.id} dmg=${result.damage.toFixed(2)} wood+${woodYield.toFixed(2)}`);
         this.objects.delete(target.id);
@@ -379,13 +413,26 @@ export class World {
       const held = this.getObject(this.agent.heldObjectId);
       if (!held) return;
       const worldPos = action.worldPos ?? { ...this.agent.pos };
+      if (this.stationFootprint.size >= World.MAX_STRUCTURE_TILES) {
+        this.logs.unshift('ANCHOR blocked: structure budget exceeded');
+        return;
+      }
+      const isAdjacent = [...this.stations.values()].some((station) => Math.hypot(station.worldPos.x - worldPos.x, station.worldPos.y - worldPos.y) <= 2.35);
+      const localResourceSupport = this.biomassAt(worldPos.x, worldPos.y) > 0.72 || this.moistureAt(worldPos.x, worldPos.y) > 0.58;
+      if (this.stations.size > 0 && !isAdjacent && !localResourceSupport) {
+        this.logs.unshift('ANCHOR blocked: must connect to logistics/resource zone');
+        return;
+      }
       const anchored = anchorObject(held, worldPos);
       this.objects.set(held.id, anchored);
       this.agent.heldObjectId = undefined;
       anchored.heldBy = undefined;
       const station = stationFromAnchoredObject(anchored);
+      station.functionType = this.chooseStationFunction(worldPos);
       this.stations.set(anchored.id, station);
-      this.logs.unshift(`ANCHOR ${held.id} q=${station.quality.toFixed(2)}`);
+      this.stationDurability.set(anchored.id, 1);
+      this.stationFootprint.set(anchored.id, 1 + this.stations.size * 0.08);
+      this.logs.unshift(`ANCHOR ${held.id} q=${station.quality.toFixed(2)} fn=${station.functionType}`);
       return;
     }
   }
@@ -405,18 +452,80 @@ export class World {
   consumeBiomassAt(x: number, y: number, amount: number): number {
     const { gx, gy } = this.biomassCellFor(x, y);
     const current = this.biomass[gy]?.[gx] ?? 1;
-    const next = Math.max(0, current - Math.max(0, amount));
+    const pressure = this.harvestPressure[gy]?.[gx] ?? 0;
+    const requested = Math.max(0, amount);
+    const overfarmPenalty = Math.max(0.3, 1 - pressure * 0.7);
+    const harvested = Math.min(current, requested) * overfarmPenalty;
+    const next = Math.max(0, current - harvested);
     if (this.biomass[gy]) this.biomass[gy][gx] = next;
-    return next;
+    if (this.harvestPressure[gy]) this.harvestPressure[gy][gx] = Math.min(1, pressure + requested * 0.65);
+    if (this.biomassCooldown[gy]) this.biomassCooldown[gy][gx] = Math.max(this.biomassCooldown[gy][gx], 28);
+    return harvested;
   }
 
   regrowBiomass(amount: number): void {
     const rate = Math.max(0, amount);
     for (let y = 0; y < this.biomassResolution; y++) {
       for (let x = 0; x < this.biomassResolution; x++) {
-        this.biomass[y][x] = Math.min(1, this.biomass[y][x] + rate);
+        const cooldown = this.biomassCooldown[y][x];
+        if (cooldown > 0) {
+          this.biomassCooldown[y][x] = cooldown - 1;
+        } else {
+          const pressure = this.harvestPressure[y][x];
+          const carry = this.biomassCapacity[y][x];
+          const regenRate = rate * Math.max(0.2, 1 - pressure * 0.5);
+          this.biomass[y][x] = Math.min(carry, this.biomass[y][x] + regenRate);
+        }
+        this.harvestPressure[y][x] = Math.max(0, this.harvestPressure[y][x] - rate * 0.55);
       }
     }
+  }
+
+  moistureAt(x: number, y: number): number {
+    const { gx, gy } = this.biomassCellFor(x, y);
+    return this.moisture[gy]?.[gx] ?? 0.2;
+  }
+
+  regrowMoisture(amount: number): void {
+    const rate = Math.max(0, amount);
+    for (let y = 0; y < this.biomassResolution; y++) {
+      for (let x = 0; x < this.biomassResolution; x++) {
+        const cap = this.moistureCapacity[y][x];
+        this.moisture[y][x] = Math.min(cap, this.moisture[y][x] + rate * 0.4);
+      }
+    }
+    this.seedMoistureField(0.015);
+  }
+
+  nearestWaterDistance(x: number, y: number): number {
+    return this.waterSources.reduce((best, src) => Math.min(best, Math.hypot(src.x - x, src.y - y)), Number.POSITIVE_INFINITY);
+  }
+
+  nearestWaterSource(x: number, y: number): { x: number; y: number } {
+    let best = this.waterSources[0];
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (const source of this.waterSources) {
+      const dist = Math.hypot(source.x - x, source.y - y);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = source;
+      }
+    }
+    return { ...best };
+  }
+
+  richestBiomassCellCenter(): { x: number; y: number } {
+    let best = { gx: 0, gy: 0, value: -1 };
+    for (let gy = 0; gy < this.biomassResolution; gy++) {
+      for (let gx = 0; gx < this.biomassResolution; gx++) {
+        const value = (this.biomass[gy]?.[gx] ?? 0) - (this.harvestPressure[gy]?.[gx] ?? 0) * 0.3;
+        if (value > best.value) best = { gx, gy, value };
+      }
+    }
+    return {
+      x: ((best.gx + 0.5) / this.biomassResolution) * this.width,
+      y: ((best.gy + 0.5) / this.biomassResolution) * this.height,
+    };
   }
 
   biomassStats(): { avg: number; min: number } {
@@ -429,7 +538,11 @@ export class World {
   targetYieldStats(): { targetsAlive: number; avgTargetYield: number } {
     const targets = [...this.objects.values()].filter((entry) => entry.debugFamily === 'target-visual');
     const avgTargetYield =
-      targets.reduce((sum, target) => sum + this.biomassAt(target.pos.x, target.pos.y), 0) / Math.max(1, targets.length);
+      targets.reduce((sum, target) => {
+        const { gx, gy } = this.biomassCellFor(target.pos.x, target.pos.y);
+        const pressure = this.harvestPressure[gy]?.[gx] ?? 0;
+        return sum + this.biomassAt(target.pos.x, target.pos.y) * Math.max(0.35, 1 - pressure * 0.6);
+      }, 0) / Math.max(1, targets.length);
     return { targetsAlive: targets.length, avgTargetYield };
   }
 
@@ -457,9 +570,77 @@ export class World {
       const anchored = this.objects.get(stationId);
       if (!anchored || !anchored.anchored) {
         this.stations.delete(stationId);
+        this.stationDurability.delete(stationId);
+        this.stationFootprint.delete(stationId);
         continue;
       }
-      this.stations.set(stationId, stationFromAnchoredObject(anchored));
+      const previous = this.stations.get(stationId);
+      const durability = this.stationDurability.get(stationId) ?? 1;
+      const updated = stationFromAnchoredObject(anchored);
+      updated.functionType = previous?.functionType ?? updated.functionType;
+      const debrisPenalty = this.localDebrisPenalty(updated.worldPos.x, updated.worldPos.y);
+      updated.quality *= Math.max(0.15, durability - debrisPenalty * 0.2);
+      updated.bonuses.maxPlanarityGain *= Math.max(0.2, durability);
+      this.stations.set(stationId, updated);
+    }
+  }
+
+  tickStructureDecay(): void {
+    for (const station of this.stations.values()) {
+      const durability = this.stationDurability.get(station.objectId) ?? 1;
+      const debrisPenalty = this.localDebrisPenalty(station.worldPos.x, station.worldPos.y);
+      const decay = 0.0018 + debrisPenalty * 0.0014;
+      this.stationDurability.set(station.objectId, Math.max(0.1, durability - decay));
+    }
+  }
+
+  maintainNearestStation(x: number, y: number, amount = 0.04): number {
+    let best: { id: number; dist: number } | undefined;
+    for (const station of this.stations.values()) {
+      const dist = Math.hypot(station.worldPos.x - x, station.worldPos.y - y);
+      if (!best || dist < best.dist) best = { id: station.objectId, dist };
+    }
+    if (!best || best.dist > 2.2) return 0;
+    const current = this.stationDurability.get(best.id) ?? 1;
+    const next = Math.min(1, current + Math.max(0, amount));
+    this.stationDurability.set(best.id, next);
+    return next - current;
+  }
+
+  stationMaintenancePressure(): number {
+    if (!this.stations.size) return 0;
+    const avgDurability = [...this.stationDurability.values()].reduce((sum, value) => sum + value, 0) / Math.max(1, this.stationDurability.size);
+    return Math.max(0, 1 - avgDurability);
+  }
+
+  structureSupportLogistics(): number {
+    const storageCount = [...this.stations.values()].filter((entry) => entry.functionType === 'storage').length;
+    return Math.min(0.5, storageCount * 0.08);
+  }
+
+  private chooseStationFunction(worldPos: { x: number; y: number }): StationFunction {
+    if (this.moistureAt(worldPos.x, worldPos.y) > 0.62) return 'purifier';
+    if (this.biomassAt(worldPos.x, worldPos.y) > 0.9) return 'storage';
+    if (this.stations.size % 3 === 0) return 'beacon';
+    return 'workshop';
+  }
+
+  private localDebrisPenalty(x: number, y: number): number {
+    const nearbyDebris = [...this.objects.values()].filter((entry) => entry.debugFamily === 'fragment' && Math.hypot(entry.pos.x - x, entry.pos.y - y) <= 1.8).length;
+    return Math.min(0.5, nearbyDebris * 0.04);
+  }
+
+  private seedMoistureField(boost = 0.03): void {
+    for (let gy = 0; gy < this.biomassResolution; gy++) {
+      for (let gx = 0; gx < this.biomassResolution; gx++) {
+        const x = ((gx + 0.5) / this.biomassResolution) * this.width;
+        const y = ((gy + 0.5) / this.biomassResolution) * this.height;
+        const nearest = this.nearestWaterDistance(x, y);
+        const sourceInfluence = Math.max(0, 1 - nearest / 5.5);
+        const cap = 0.12 + sourceInfluence * 0.88;
+        this.moistureCapacity[gy][gx] = cap;
+        this.moisture[gy][gx] = Math.min(cap, this.moisture[gy][gx] + boost * sourceInfluence);
+      }
     }
   }
 }

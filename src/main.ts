@@ -109,6 +109,9 @@ function refresh(): void {
   embeddingVizEl.innerHTML = renderEmbedding(lastEmbeddingSnapshot);
   view.showTrueLatentState = showTrueLatentState;
   view.showWorkset = showWorksetOverlay;
+  view.showBiomassOverlay = showBiomassOverlay;
+  view.showMoistureOverlay = showMoistureOverlay;
+  view.showDebrisOverlay = showDebrisOverlay;
   view.render(selectedEl, logEl);
 }
 
@@ -343,6 +346,9 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
     `embedding clusters=${result.embeddingClusters} windowN=${result.embeddingsInWindow}`,
     `station quality=${result.stationQuality.toFixed(3)} activeStation=${result.activeStationId ?? 'n/a'} activeQ=${result.activeStationQuality.toFixed(3)} dist=${(result.distanceToActiveStation ?? 0).toFixed(2)}`,
     `stations=${result.stationQualities.map((entry) => `${entry.id}:${entry.quality.toFixed(3)}`).join(', ') || 'none'}`,
+    world.stations.size
+      ? `structure functions=${['storage', 'workshop', 'purifier', 'beacon'].map((fn) => `${fn}:${[...world.stations.values()].filter((station) => station.functionType === fn).length}`).join(' ')}`
+      : 'structure functions=none',
     `duty=${result.dutyMode} lab=${result.dutyCycleLab.toFixed(2)} world=${result.dutyCycleWorld.toFixed(2)} timeInRegime=${result.timeInRegime.toFixed(1)}s`,
     `workset size=${result.worksetSize} age=${result.worksetAgeSec.toFixed(1)}s home=${result.worksetHomeStationId ?? 'n/a'} atStation=${result.worksetAtStationFraction.toFixed(2)} avgDist=${result.avgDistanceToStation.toFixed(2)}`,
     `haul trips/min=${result.haulTripsPerMin.toFixed(2)} ids=[${result.worksetIds.join(',')}]`,
@@ -362,6 +368,7 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
   livePanel.setTimeline(liveTimeline);
   // Living Mode UI updates
   if (result.livingMode) {
+    view.agentNeeds = result.agentNeeds;
     if (result.rewardBreakdown) {
       const rb = result.rewardBreakdown;
       rewardBreakdownEl.innerHTML = [
@@ -378,17 +385,25 @@ function maybeRenderLive(result: LiveTickResult, livePanel: LiveModePanel): void
         `energy=${n.energy.toFixed(2)} hydration=${n.hydration.toFixed(2)} temp=${n.temperature.toFixed(2)}`,
         `damage=${n.damage.toFixed(2)} fatigue=${n.fatigue.toFixed(2)}`,
         `intent=${result.agentIntent} drivers=[${(result.agentIntentDrivers ?? []).join(', ')}]`,
+        result.agentIntentScores?.length
+          ? `intent scores: ${result.agentIntentScores.map((entry) => `${entry.intent}:${entry.score.toFixed(2)}`).join(' | ')}`
+          : '',
         result.skillMetrics ? `skills: owned=${result.skillMetrics.ownedSkills} total=${result.skillMetrics.totalSkills}` : '',
+        result.roleDistribution
+          ? `roles forager=${result.roleDistribution.forager} builder=${result.roleDistribution.builder} maintainer=${result.roleDistribution.maintainer}`
+          : '',
         result.skillMetrics?.recentDiscoveries.length ? `recent: ${result.skillMetrics.recentDiscoveries.slice(-3).join(', ')}` : '',
         `repeatPenalty=${result.repeatPenalty.toFixed(3)} waterSources=${result.waterSources}`,
       ].join('<br/>');
     }
     agentInspectorEl.innerHTML = [
-      `action=${result.action} intent=${result.agentIntent}`,
+      `action=${result.action} intent=${result.agentIntent} role=${result.agentRole ?? 'n/a'}`,
       result.agentIntentDrivers ? `why: ${result.agentIntentDrivers.join(', ')}` : '',
+      result.rewardBreakdown ? `top reward terms: ${result.rewardBreakdown.topContributors.map((c) => `${c.name}=${c.value.toFixed(3)}`).join(', ')}` : '',
       `predErr=${result.predictionErrorMean.toFixed(3)} regime=${result.regime}`,
     ].join('<br/>');
   }
+  if (!result.livingMode) view.agentNeeds = undefined;
   refresh();
 }
 
@@ -407,11 +422,19 @@ function startLiveMode(config: LiveModePanelConfig, livePanel: LiveModePanel): v
     deterministic: config.deterministic,
     rollingSeconds: config.rollingSeconds,
     livingMode: config.livingMode,
+    livingPreset: config.livingPreset,
   });
   world = liveEngine.world;
   view = new CanvasView(canvas, world, perception);
   view.showTrueLatentState = showTrueLatentState;
   view.showWorkset = showWorksetOverlay;
+  if (config.livingPreset === 'living-v1-ecology') {
+    showBiomassOverlay = true;
+    showMoistureOverlay = true;
+  }
+  view.showBiomassOverlay = showBiomassOverlay;
+  view.showMoistureOverlay = showMoistureOverlay;
+  view.showDebrisOverlay = showDebrisOverlay;
   const startAt = performance.now();
   const maxRuntimeMs = config.runIndefinitely ? Number.POSITIVE_INFINITY : config.durationMinutes * 60_000;
   const simulationBatch = (): void => {
@@ -522,6 +545,7 @@ function startEvolution(config: EvolutionPanelConfig): void {
     rollingSeconds: 60,
     showTrueLatentState: false,
     livingMode: false,
+    livingPreset: 'default',
   };
   liveConfig = evoDefaults;
   liveEngine = new LiveModeEngine({
@@ -530,6 +554,7 @@ function startEvolution(config: EvolutionPanelConfig): void {
     ticksPerSecond: evoDefaults.ticksPerSecond,
     deterministic: evoDefaults.deterministic,
     rollingSeconds: evoDefaults.rollingSeconds,
+    livingPreset: evoDefaults.livingPreset,
   });
   world = liveEngine.world;
   view = new CanvasView(canvas, world, perception);

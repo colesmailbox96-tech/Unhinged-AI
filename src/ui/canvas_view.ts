@@ -1,5 +1,6 @@
 import { PerceptionHead } from '../ai/perception';
 import type { WorldObject } from '../sim/object_model';
+import type { AgentNeeds } from '../sim/needs';
 import { PROPERTY_KEYS } from '../sim/properties';
 import { World } from '../sim/world';
 
@@ -12,6 +13,7 @@ export class CanvasView {
   showBiomassOverlay = false;
   showMoistureOverlay = false;
   showDebrisOverlay = false;
+  agentNeeds?: AgentNeeds;
   private readonly canvas: HTMLCanvasElement;
   private readonly world: World;
   private readonly perception: PerceptionHead;
@@ -55,6 +57,17 @@ export class CanvasView {
           const cellW = this.canvas.width / this.world.biomassResolution;
           const cellH = this.canvas.height / this.world.biomassResolution;
           ctx.fillStyle = `rgba(34,139,34,${(val * 0.35).toFixed(2)})`;
+          ctx.fillRect(gx * cellW, gy * cellH, cellW, cellH);
+        }
+      }
+    }
+    if (this.showMoistureOverlay) {
+      for (let gy = 0; gy < this.world.biomassResolution; gy++) {
+        for (let gx = 0; gx < this.world.biomassResolution; gx++) {
+          const val = this.world.moisture[gy]?.[gx] ?? 0;
+          const cellW = this.canvas.width / this.world.biomassResolution;
+          const cellH = this.canvas.height / this.world.biomassResolution;
+          ctx.fillStyle = `rgba(70,120,255,${(val * 0.28).toFixed(2)})`;
           ctx.fillRect(gx * cellW, gy * cellH, cellW, cellH);
         }
       }
@@ -237,19 +250,38 @@ export class CanvasView {
     ctx.fillStyle = 'rgba(255,255,200,0.8)';
     ctx.font = '10px system-ui';
     ctx.fillText(this.agentIntent, agentX + 6, agentY - 6);
+    if (this.agentNeeds) {
+      const barW = 30;
+      const drawBar = (value: number, yOffset: number, color: string): void => {
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(agentX + 6, agentY + yOffset, barW, 3);
+        ctx.fillStyle = color;
+        ctx.fillRect(agentX + 6, agentY + yOffset, barW * Math.max(0, Math.min(1, value)), 3);
+      };
+      drawBar(this.agentNeeds.energy, 0, '#7fff7f');
+      drawBar(this.agentNeeds.hydration, 5, '#6ec8ff');
+    }
     // Station overlays
     for (const station of this.world.stations.values()) {
       const stX = station.worldPos.x * sx;
       const stY = station.worldPos.y * sy;
-      ctx.strokeStyle = 'rgba(200,150,255,0.5)';
+      const stationColor =
+        station.functionType === 'storage'
+          ? 'rgba(255,215,120,0.65)'
+          : station.functionType === 'purifier'
+            ? 'rgba(100,180,255,0.65)'
+            : station.functionType === 'beacon'
+              ? 'rgba(240,160,255,0.65)'
+              : 'rgba(170,255,170,0.65)';
+      ctx.strokeStyle = stationColor;
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.arc(stX, stY, 18, 0, Math.PI * 2);
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = 'rgba(200,150,255,0.7)';
+      ctx.fillStyle = stationColor;
       ctx.font = '9px system-ui';
-      ctx.fillText(`station q=${station.quality.toFixed(2)}`, stX + 10, stY - 4);
+      ctx.fillText(`${station.functionType} q=${station.quality.toFixed(2)}`, stX + 10, stY - 4);
     }
 
     logEl.textContent = this.world.logs.slice(0, 18).join('\n');

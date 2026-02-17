@@ -15,10 +15,13 @@ export interface StationBonuses {
   maxPlanarityGain: number;
 }
 
+export type StationFunction = 'storage' | 'workshop' | 'purifier' | 'beacon';
+
 export interface AnchoredStation {
   objectId: number;
   worldPos: Vec2;
   quality: number;
+  functionType: StationFunction;
   metrics: StationQualityMetrics;
   bonuses: StationBonuses;
 }
@@ -44,6 +47,7 @@ export function stationFromAnchoredObject(obj: WorldObject): AnchoredStation {
     objectId: obj.id,
     worldPos: { ...obj.pos },
     quality,
+    functionType: 'workshop',
     metrics,
     bonuses,
   };

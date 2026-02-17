@@ -88,9 +88,10 @@ npm run dev
 
 1. Open browser at `http://localhost:5173`
 2. In the Live Mode panel, check **Living Mode** checkbox
-3. Click **Start Live**
-4. Watch the Reward Breakdown, Agent Inspector, and Living Status panels
-5. Toggle Biomass/Debris overlays to see environmental state
+3. Select preset **Living v1 (Ecology)**
+4. Click **Start Live**
+5. Toggle **Biomass** + **Moisture** overlays and watch station labels (`storage/workshop/purifier/beacon`)
+6. Inspect **Living Mode Status** for intent scores + role distribution and **Agent Inspector** for top reward drivers
 
 ### Save/Load
 - **Export Snapshot**: Saves world state as JSON

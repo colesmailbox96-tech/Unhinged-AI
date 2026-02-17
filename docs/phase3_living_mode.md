@@ -41,7 +41,7 @@ while discovering skills, crafting tools, and exploring an evolving environment.
 - **craftingOutcome**: Precision improvements from BIND/CONTROL actions
 
 ### Intrinsic Reward Components
-- **novelty**: Increments only when prediction error exceeds threshold AND property delta is significant
+- **novelty**: increments only when prediction error exceeds threshold AND property delta is significant
 - **predictionError**: World model prediction error contribution
 - **empowerment**: Repeatability score contribution (outcome controllability)
 - **skillDiscovery**: Reward for discovering new reliable property transformations

@@ -1,4 +1,4 @@
-import { deriveGripScore, type ObjID, type ShapeType, type WorldObject } from './object_model';
+import { deriveGripScore, deriveShelterQuality, type ObjID, type ShapeType, type WorldObject } from './object_model';
 import { bindObjects, cool, grind, heat, soak, strike } from './interactions';
 import { fibrousTargetProps, materialDistributions, sampleProperties } from './material_distributions';
 import { fibrousTargetScore } from './properties';
@@ -117,10 +117,12 @@ export class World {
   readonly seasonCycleTicks = 4800;
   /** Separate RNG for environmental systems to avoid perturbing main simulation RNG. */
   private readonly envRng: RNG;
+  /** Prime offset ensures the environmental RNG stream is independent from the main stream. */
+  private static readonly ENV_RNG_SEED_OFFSET = 7919;
 
   constructor(seed: number) {
     this.rng = new RNG(seed);
-    this.envRng = new RNG(seed + 7919); // separate stream for environmental systems
+    this.envRng = new RNG(seed + World.ENV_RNG_SEED_OFFSET);
     this.biomass = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 1));
     this.biomassCapacity = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 1));
     this.biomassCooldown = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 0));
@@ -164,6 +166,8 @@ export class World {
     }
     this.seedMoistureField();
 
+    // Use only the original 4 base material families for initial objects to maintain
+    // deterministic compatibility. New distributions are used by spawnLooseObject.
     for (let i = 0; i < 10; i++) {
       const d = materialDistributions[i % 4];
       this.addObject({
@@ -493,12 +497,7 @@ export class World {
       if (!shelterObj) return;
       const dist = Math.hypot(shelterObj.pos.x - this.agent.pos.x, shelterObj.pos.y - this.agent.pos.y);
       if (dist > World.MAX_PICKUP_DISTANCE) return;
-      // Shelter quality is derived from material properties — not labelled
-      const shieldFactor = (shelterObj.props.density * 0.3 +
-        shelterObj.props.mass * 0.25 +
-        shelterObj.props.compressive_strength * 0.2 +
-        shelterObj.integrity * 0.25);
-      this.agent.shelterFactor = Math.max(0, Math.min(1, shieldFactor));
+      this.agent.shelterFactor = deriveShelterQuality(shelterObj);
       this.agent.shelteredByObjId = shelterObj.id;
       this.logs.unshift(`SHELTER near ${shelterObj.id} factor=${this.agent.shelterFactor.toFixed(2)}`);
       return;

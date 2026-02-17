@@ -5,7 +5,7 @@ import { WorldModel, type WorldModelInput, type WorldModelOutcome, type WorldMod
 import { ClosedLoopController, type ControllerRuntimeState } from '../ai/controller';
 import type { InteractionOutcome } from '../sim/world';
 import { World } from '../sim/world';
-import type { ObjID, WorldObject } from '../sim/object_model';
+import { deriveShelterQuality, type ObjID, type WorldObject } from '../sim/object_model';
 import { MilestoneTracker, type MilestoneEvent } from '../sim/milestones';
 import type { MeasurementResult } from '../sim/metrology';
 import {
@@ -251,6 +251,14 @@ const MANUFACTURE_DUTY = {
 
 const ECOLOGY_LIMITS = {
   MAX_OBJECTS: 120,
+} as const;
+
+const SHELTER_INTENT_WEIGHTS = {
+  HAZARD_WEIGHT: 1.6,
+  DAMAGE_THRESHOLD: 0.2,
+  DAMAGE_WEIGHT: 1.2,
+  TEMP_THRESHOLD: 0.15,
+  TEMP_WEIGHT: 0.8,
 } as const;
 
 const MEASUREMENT_SPAM_POLICY = {
@@ -650,8 +658,14 @@ export class LiveModeEngine {
       },
       {
         intent: 'SEEK_SHELTER',
-        score: this.world.agentHazardExposure() * 1.6 + Math.max(0, memory.needs.damage - 0.2) * 1.2 + Math.max(0, Math.abs(memory.needs.temperature - 0.5) - 0.15) * 0.8,
-        breakdown: [`hazard=${(this.world.agentHazardExposure() * 1.6).toFixed(2)}`, `damage=${(Math.max(0, memory.needs.damage - 0.2) * 1.2).toFixed(2)}`, `tempStress=${(Math.max(0, Math.abs(memory.needs.temperature - 0.5) - 0.15) * 0.8).toFixed(2)}`],
+        score: this.world.agentHazardExposure() * SHELTER_INTENT_WEIGHTS.HAZARD_WEIGHT +
+          Math.max(0, memory.needs.damage - SHELTER_INTENT_WEIGHTS.DAMAGE_THRESHOLD) * SHELTER_INTENT_WEIGHTS.DAMAGE_WEIGHT +
+          Math.max(0, Math.abs(memory.needs.temperature - 0.5) - SHELTER_INTENT_WEIGHTS.TEMP_THRESHOLD) * SHELTER_INTENT_WEIGHTS.TEMP_WEIGHT,
+        breakdown: [
+          `hazard=${(this.world.agentHazardExposure() * SHELTER_INTENT_WEIGHTS.HAZARD_WEIGHT).toFixed(2)}`,
+          `damage=${(Math.max(0, memory.needs.damage - SHELTER_INTENT_WEIGHTS.DAMAGE_THRESHOLD) * SHELTER_INTENT_WEIGHTS.DAMAGE_WEIGHT).toFixed(2)}`,
+          `tempStress=${(Math.max(0, Math.abs(memory.needs.temperature - 0.5) - SHELTER_INTENT_WEIGHTS.TEMP_THRESHOLD) * SHELTER_INTENT_WEIGHTS.TEMP_WEIGHT).toFixed(2)}`,
+        ],
       },
     ];
     this._agentIntentScores = scores.sort((a, b) => b.score - a.score);
@@ -952,13 +966,13 @@ export class LiveModeEngine {
       } else if (intent === 'REST') {
         chosen = { verb: 'REST', score: 0 };
       } else if (intent === 'SEEK_SHELTER') {
-        // Find the nearest large/dense object to shelter near
+        // Find the nearest object with good shelter properties
         const nearbyIds = this.world.getNearbyObjectIds(3.0);
         let bestShelter: { id: number; score: number } | undefined;
         for (const id of nearbyIds) {
           const obj = this.world.objects.get(id);
           if (!obj || obj.heldBy !== undefined) continue;
-          const shelterScore = obj.props.density * 0.3 + obj.props.mass * 0.25 + obj.props.compressive_strength * 0.2 + obj.integrity * 0.25;
+          const shelterScore = deriveShelterQuality(obj);
           if (!bestShelter || shelterScore > bestShelter.score) bestShelter = { id, score: shelterScore };
         }
         if (bestShelter) {

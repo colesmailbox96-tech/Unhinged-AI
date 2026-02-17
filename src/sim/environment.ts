@@ -38,14 +38,22 @@ export function seasonPhase(tick: number, seasonLengthTicks: number): number {
   return (tick % seasonLengthTicks) / seasonLengthTicks;
 }
 
+const SEASONAL_BASE = 0.7;
+const SEASONAL_AMPLITUDE = 0.3;
+const SEASONAL_MIN = 0.6;
+const SEASONAL_SUMMER_PHASE = 0.25;
+
 /**
  * Biomass growth multiplier from season.
  * Higher in spring/summer, lower in autumn/winter.
- * Range is [0.6, 1.0] — subtle enough to not break existing progression.
+ * Range is [SEASONAL_MIN, 1.0] — subtle enough to not break existing progression.
  */
 export function seasonalBiomassMultiplier(season: number): number {
-  // sin curve: peak at season=0.25 (summer), trough at season=0.75 (winter)
-  return clamp(0.7 + 0.3 * Math.sin((season - 0.25) * Math.PI * 2 + Math.PI / 2), 0.6, 1);
+  return clamp(
+    SEASONAL_BASE + SEASONAL_AMPLITUDE * Math.sin((season - SEASONAL_SUMMER_PHASE) * Math.PI * 2 + Math.PI / 2),
+    SEASONAL_MIN,
+    1,
+  );
 }
 
 /**

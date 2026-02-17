@@ -60,3 +60,17 @@ export function estimateContactArea(shapeType: ShapeType, length: number, thickn
   if (shapeType === 'plate') return length * thickness * 1.2;
   return (length * thickness) / 2;
 }
+
+/**
+ * Compute shelter quality from an object's physical properties.
+ * Dense, heavy, strong, intact objects provide better shelter.
+ * Returns a value in [0, 1].
+ */
+export function deriveShelterQuality(obj: WorldObject): number {
+  return Math.max(0, Math.min(1,
+    obj.props.density * 0.3 +
+    obj.props.mass * 0.25 +
+    obj.props.compressive_strength * 0.2 +
+    obj.integrity * 0.25,
+  ));
+}

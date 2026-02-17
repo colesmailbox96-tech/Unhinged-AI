@@ -19,14 +19,15 @@ import {
 import { TrainingScheduler, type TrainingMetrics } from '../sim/trainingScheduler';
 import { StallDetector, type StallMetrics } from '../sim/stallDetector';
 import { PopulationController, type PopulationMetrics } from '../sim/populationController';
-import { type AgentNeeds, createDefaultNeeds, tickNeeds, homeostasisReward, mostUrgentNeed } from '../sim/needs';
+import { type AgentNeeds, type EnvironmentalPressure, createDefaultNeeds, tickNeeds, homeostasisReward, mostUrgentNeed } from '../sim/needs';
 import { SkillTracker, type SkillDiscoveryMetrics } from '../sim/skills';
 import { RewardBreakdown, RepeatTracker, diminishingReturnMultiplier, type RewardBreakdownSnapshot } from '../sim/reward_breakdown';
 import { PROPERTY_KEYS } from '../sim/properties';
+import { dayPhase, seasonPhase } from '../sim/environment';
 
-type LiveVerb = 'MOVE_TO' | 'PICK_UP' | 'DROP' | 'BIND_TO' | 'STRIKE_WITH' | 'GRIND' | 'HEAT' | 'SOAK' | 'COOL' | 'ANCHOR' | 'CONTROL' | 'REST';
+type LiveVerb = 'MOVE_TO' | 'PICK_UP' | 'DROP' | 'BIND_TO' | 'STRIKE_WITH' | 'GRIND' | 'HEAT' | 'SOAK' | 'COOL' | 'ANCHOR' | 'CONTROL' | 'REST' | 'SHELTER';
 export type LiveRegime = 'explore' | 'exploit' | 'manufacture';
-type LiveIntent = 'SEEK_WATER' | 'SEEK_FOOD' | 'HARVEST' | 'CRAFT' | 'BUILD' | 'MAINTAIN' | 'EXPLORE' | 'REST';
+type LiveIntent = 'SEEK_WATER' | 'SEEK_FOOD' | 'HARVEST' | 'CRAFT' | 'BUILD' | 'MAINTAIN' | 'EXPLORE' | 'REST' | 'SEEK_SHELTER';
 type LiveRole = 'forager' | 'builder' | 'maintainer';
 
 interface CandidateAction {
@@ -161,6 +162,13 @@ export interface LiveTickResult {
   skillMetrics?: SkillDiscoveryMetrics;
   waterSources: number;
   repeatPenalty: number;
+  // Environmental state
+  ambientTemperature: number;
+  seasonPhase: number;
+  dayPhase: number;
+  hazardExposure: number;
+  activeEventCount: number;
+  scarcityPressure: number;
 }
 
 export interface SegmentFrame {
@@ -434,6 +442,9 @@ export class LiveModeEngine {
   readonly rewardBreakdown = new RewardBreakdown();
   readonly repeatTracker = new RepeatTracker();
   private _lastRepeatPenalty = 0;
+  private _lastEnvState: { ambientTemperature: number; biomassMultiplier: number; hazardIntensityBoost: number; hydrationDrain: number; scarcity: number } = {
+    ambientTemperature: 0.5, biomassMultiplier: 1, hazardIntensityBoost: 0, hydrationDrain: 0, scarcity: 1,
+  };
 
   constructor(config: LiveModeConfig) {
     this.config = config;
@@ -637,6 +648,11 @@ export class LiveModeEngine {
         score: fatigueNeed + Math.max(0, 0.42 - memory.needs.energy) * 0.8,
         breakdown: [`fatigue=${fatigueNeed.toFixed(2)}`, `energyDeficit=${(Math.max(0, 0.42 - memory.needs.energy) * 0.8).toFixed(2)}`],
       },
+      {
+        intent: 'SEEK_SHELTER',
+        score: this.world.agentHazardExposure() * 1.6 + Math.max(0, memory.needs.damage - 0.2) * 1.2 + Math.max(0, Math.abs(memory.needs.temperature - 0.5) - 0.15) * 0.8,
+        breakdown: [`hazard=${(this.world.agentHazardExposure() * 1.6).toFixed(2)}`, `damage=${(Math.max(0, memory.needs.damage - 0.2) * 1.2).toFixed(2)}`, `tempStress=${(Math.max(0, Math.abs(memory.needs.temperature - 0.5) - 0.15) * 0.8).toFixed(2)}`],
+      },
     ];
     this._agentIntentScores = scores.sort((a, b) => b.score - a.score);
     this._agentIntentDrivers = this._agentIntentScores[0]?.breakdown ?? [];
@@ -806,6 +822,9 @@ export class LiveModeEngine {
       this.world.apply({ type: 'ANCHOR' });
       if (heldBefore) transformedObjectIds.push(heldBefore);
     }
+    if (chosen.verb === 'SHELTER' && chosen.objId) {
+      this.world.apply({ type: 'SHELTER', objId: chosen.objId });
+    }
     if (chosen.verb === 'CONTROL' && this.world.agent.heldObjectId) {
       const held = this.world.objects.get(this.world.agent.heldObjectId);
       if (held) {
@@ -842,7 +861,15 @@ export class LiveModeEngine {
   }
 
   private ensureEcologyPressure(): void {
-    this.world.regrowBiomass(0.0035);
+    // Tick environmental systems only when ecology is enabled
+    if (this.ecologyEnabled || this.config.livingMode) {
+      const envState = this.world.tickEnvironment(this.tick);
+      this._lastEnvState = envState;
+    }
+
+    // Apply seasonal biomass multiplier to regrowth rate only with ecology enabled
+    const biomassMult = this.ecologyEnabled ? this._lastEnvState.biomassMultiplier : 1;
+    this.world.regrowBiomass(0.0035 * biomassMult);
     if (this.ecologyEnabled) {
       this.world.regrowMoisture(0.004);
       this.world.tickStructureDecay();
@@ -924,6 +951,27 @@ export class LiveModeEngine {
         chosen = pick(['CONTROL', 'BIND_TO', 'GRIND']) ?? chosen;
       } else if (intent === 'REST') {
         chosen = { verb: 'REST', score: 0 };
+      } else if (intent === 'SEEK_SHELTER') {
+        // Find the nearest large/dense object to shelter near
+        const nearbyIds = this.world.getNearbyObjectIds(3.0);
+        let bestShelter: { id: number; score: number } | undefined;
+        for (const id of nearbyIds) {
+          const obj = this.world.objects.get(id);
+          if (!obj || obj.heldBy !== undefined) continue;
+          const shelterScore = obj.props.density * 0.3 + obj.props.mass * 0.25 + obj.props.compressive_strength * 0.2 + obj.integrity * 0.25;
+          if (!bestShelter || shelterScore > bestShelter.score) bestShelter = { id, score: shelterScore };
+        }
+        if (bestShelter) {
+          const shelterObj = this.world.objects.get(bestShelter.id)!;
+          const dist = Math.hypot(shelterObj.pos.x - this.world.agent.pos.x, shelterObj.pos.y - this.world.agent.pos.y);
+          if (dist > 1.5) {
+            chosen = { verb: 'MOVE_TO', moveTarget: { x: shelterObj.pos.x, y: shelterObj.pos.y }, score: 0.8 };
+          } else {
+            chosen = { verb: 'SHELTER', objId: bestShelter.id, score: 0.9 };
+          }
+        } else {
+          chosen = pick(['MOVE_TO']) ?? chosen;
+        }
       } else {
         chosen = pick(['MOVE_TO', 'PICK_UP', 'DROP']) ?? chosen;
       }
@@ -950,7 +998,14 @@ export class LiveModeEngine {
     let skillReward = 0;
     const heldBeforeProps = held ? { ...held.props } : undefined;
     if (this.config.livingMode) {
-      const needsResult = tickNeeds(memory.needs, chosen.verb);
+      const envPressure: EnvironmentalPressure = {
+        ambientTemperature: this._lastEnvState.ambientTemperature,
+        hydrationDrain: this._lastEnvState.hydrationDrain,
+        hazardExposure: this.world.agentHazardExposure(),
+        hazardBreakdown: this.world.agentHazardBreakdown(),
+        scarcity: this._lastEnvState.scarcity,
+      };
+      const needsResult = tickNeeds(memory.needs, chosen.verb, undefined, envPressure);
       memory.needs = needsResult.needs;
       if (chosen.verb === 'SOAK') {
         const moistureBoost = this.world.moistureAt(this.world.agent.pos.x, this.world.agent.pos.y) * 0.04;
@@ -1255,6 +1310,12 @@ export class LiveModeEngine {
       skillMetrics: this.config.livingMode ? this.skillTracker.metrics() : undefined,
       waterSources: this.config.livingMode ? this.world.waterSources.length : 0,
       repeatPenalty: this._lastRepeatPenalty,
+      ambientTemperature: this._lastEnvState.ambientTemperature,
+      seasonPhase: seasonPhase(this.tick, this.world.seasonCycleTicks),
+      dayPhase: dayPhase(this.tick, this.world.dayNightCycleTicks),
+      hazardExposure: this.world.agentHazardExposure(),
+      activeEventCount: this.world.activeEvents.length,
+      scarcityPressure: this._lastEnvState.scarcity,
     };
   }
 

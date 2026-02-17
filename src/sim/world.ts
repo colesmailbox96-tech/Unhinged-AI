@@ -345,7 +345,7 @@ export class World {
         const travelYieldBoost = 1 + Math.max(0, distanceFromCenter) * 0.25;
         const woodYield = Math.round(localBiomass * travelYieldBoost * 1000) / 1000;
         this.woodGained += woodYield;
-        this.logs.unshift(`STRIKE ${tool.id} -> target ${target.id} dmg=${result.damage.toFixed(2)} wood+=${woodYield.toFixed(2)}`);
+        this.logs.unshift(`STRIKE ${tool.id} -> target ${target.id} dmg=${result.damage.toFixed(2)} wood+${woodYield.toFixed(2)}`);
         this.objects.delete(target.id);
         this.spatialGrid.remove(target.id);
         this.spawnTarget();

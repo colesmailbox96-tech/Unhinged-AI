@@ -20,7 +20,10 @@ export type SimEventKind =
   | 'agent-needs-critical'
   | 'measurement-taken'
   | 'controller-converged'
-  | 'stall-detected';
+  | 'stall-detected'
+  | 'environmental-event'
+  | 'hazard-exposure'
+  | 'shelter-used';
 
 export interface SimEvent {
   kind: SimEventKind;

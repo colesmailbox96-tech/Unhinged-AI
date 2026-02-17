@@ -1,4 +1,4 @@
-import { deriveGripScore, type ObjID, type ShapeType, type WorldObject } from './object_model';
+import { deriveGripScore, deriveShelterQuality, type ObjID, type ShapeType, type WorldObject } from './object_model';
 import { bindObjects, cool, grind, heat, soak, strike } from './interactions';
 import { fibrousTargetProps, materialDistributions, sampleProperties } from './material_distributions';
 import { fibrousTargetScore } from './properties';
@@ -6,6 +6,22 @@ import { RNG } from './rng';
 import { type MeasurementResult, measureConductivity, measureGeometry, measureHardness, measureMass, measureOptical } from './metrology';
 import { anchorObject, stationFromAnchoredObject, type AnchoredStation, type StationFunction } from './stations';
 import { SpatialGrid } from './spatial_grid';
+import {
+  dayPhase,
+  dayNightTemperatureShift,
+  seasonPhase,
+  seasonalBiomassMultiplier,
+  seasonalTemperatureBias,
+  hazardExposure,
+  hazardExposureByKind,
+  spawnInitialHazards,
+  maybeTriggerEvent,
+  tickEvents,
+  eventPressure,
+  scarcityPressure,
+  type HazardZone,
+  type EnvironmentalEvent,
+} from './environment';
 
 export type PrimitiveVerb =
   | { type: 'MOVE_TO'; x: number; y: number }
@@ -17,13 +33,18 @@ export type PrimitiveVerb =
   | { type: 'HEAT'; intensity: number }
   | { type: 'SOAK'; intensity: number }
   | { type: 'COOL'; intensity: number }
-  | { type: 'ANCHOR'; worldPos?: { x: number; y: number } };
+  | { type: 'ANCHOR'; worldPos?: { x: number; y: number } }
+  | { type: 'SHELTER'; objId: ObjID };
 
 export interface AgentState {
   id: number;
   pos: { x: number; y: number };
   heldObjectId?: ObjID;
   energy: number;
+  /** Shelter factor from nearby object (0 = no shelter, 1 = full shield). */
+  shelterFactor?: number;
+  /** Object the agent is sheltering near. */
+  shelteredByObjId?: ObjID;
 }
 
 interface StrikeArc {
@@ -88,15 +109,27 @@ export class World {
   ];
   worksetDebugIds: ObjID[] = [];
   worksetDropZone?: { x: number; y: number };
+  readonly hazardZones: HazardZone[];
+  activeEvents: EnvironmentalEvent[] = [];
+  /** Ticks per full day/night cycle (agents must discover the pattern). */
+  readonly dayNightCycleTicks = 600;
+  /** Ticks per full seasonal cycle. */
+  readonly seasonCycleTicks = 4800;
+  /** Separate RNG for environmental systems to avoid perturbing main simulation RNG. */
+  private readonly envRng: RNG;
+  /** Prime offset ensures the environmental RNG stream is independent from the main stream. */
+  private static readonly ENV_RNG_SEED_OFFSET = 7919;
 
   constructor(seed: number) {
     this.rng = new RNG(seed);
+    this.envRng = new RNG(seed + World.ENV_RNG_SEED_OFFSET);
     this.biomass = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 1));
     this.biomassCapacity = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 1));
     this.biomassCooldown = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 0));
     this.harvestPressure = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 0));
     this.moisture = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 0.2));
     this.moistureCapacity = Array.from({ length: this.biomassResolution }, () => Array.from({ length: this.biomassResolution }, () => 1));
+    this.hazardZones = spawnInitialHazards(this.width, this.height, this.envRng);
     this.initialize();
   }
 
@@ -133,8 +166,10 @@ export class World {
     }
     this.seedMoistureField();
 
+    // Use only the original 4 base material families for initial objects to maintain
+    // deterministic compatibility. New distributions are used by spawnLooseObject.
     for (let i = 0; i < 10; i++) {
-      const d = materialDistributions[i % materialDistributions.length];
+      const d = materialDistributions[i % 4];
       this.addObject({
         pos: { x: this.rng.range(3.5, 6.5), y: this.rng.range(3.5, 6.5) },
         shapeType: this.sampleShapeType(),
@@ -452,6 +487,21 @@ export class World {
       this.logs.unshift(`ANCHOR ${held.id} q=${station.quality.toFixed(2)} fn=${station.functionType}`);
       return;
     }
+
+    if (action.type === 'SHELTER') {
+      // Using an object as shelter: the agent must discover that placing
+      // themselves near a large, dense, high-integrity object reduces
+      // hazard exposure. The shelter effect depends on the object's physical
+      // properties — the agent learns this through interaction feedback.
+      const shelterObj = this.getObject(action.objId);
+      if (!shelterObj) return;
+      const dist = Math.hypot(shelterObj.pos.x - this.agent.pos.x, shelterObj.pos.y - this.agent.pos.y);
+      if (dist > World.MAX_PICKUP_DISTANCE) return;
+      this.agent.shelterFactor = deriveShelterQuality(shelterObj);
+      this.agent.shelteredByObjId = shelterObj.id;
+      this.logs.unshift(`SHELTER near ${shelterObj.id} factor=${this.agent.shelterFactor.toFixed(2)}`);
+      return;
+    }
   }
 
   private trimLogs(): void {
@@ -653,10 +703,86 @@ export class World {
       obj.ageTicks = (obj.ageTicks ?? 0) + tickDelta;
       if (obj.anchored || obj.heldBy !== undefined) continue; // sheltered objects don't weather
       const moistureEffect = this.moistureAt(obj.pos.x, obj.pos.y);
-      const weatherRate = baseDecay * (1 + moistureEffect * 0.5 + obj.props.porosity * 0.3);
+      const hazardEffect = hazardExposure(obj.pos.x, obj.pos.y, this.hazardZones);
+      const weatherRate = baseDecay * (1 + moistureEffect * 0.5 + obj.props.porosity * 0.3 + hazardEffect * 0.4);
       obj.integrity = Math.max(0.01, obj.integrity - weatherRate);
       obj.latentPrecision.surface_planarity = Math.max(0, obj.latentPrecision.surface_planarity - weatherRate * 0.3);
     }
+  }
+
+  /**
+   * Tick the environmental systems: day/night, seasons, events, hazard zones.
+   * Returns environmental state modifiers that the needs system can use.
+   */
+  tickEnvironment(tick: number): {
+    ambientTemperature: number;
+    biomassMultiplier: number;
+    hazardIntensityBoost: number;
+    hydrationDrain: number;
+    scarcity: number;
+  } {
+    // Day/night cycle
+    const dPhase = dayPhase(tick, this.dayNightCycleTicks);
+    const dayTempShift = dayNightTemperatureShift(dPhase);
+
+    // Seasonal cycle
+    const sPhase = seasonPhase(tick, this.seasonCycleTicks);
+    const seasonBioMult = seasonalBiomassMultiplier(sPhase);
+    const seasonTemp = seasonalTemperatureBias(sPhase);
+
+    // Environmental events
+    const maybeEvent = maybeTriggerEvent(this.envRng, 0.0004, 200);
+    if (maybeEvent) this.activeEvents.push(maybeEvent);
+    this.activeEvents = tickEvents(this.activeEvents);
+    const ep = eventPressure(this.activeEvents);
+
+    // Scarcity
+    const scarcity = scarcityPressure(tick);
+
+    // Apply seasonal biomass effect to regrowth
+    const ambientTemperature = 0.5 + dayTempShift + seasonTemp + ep.temperatureShift;
+    const biomassMultiplier = seasonBioMult * ep.biomassMultiplier;
+
+    // Clear shelter if agent moved far from shelter object
+    if (this.agent.shelteredByObjId !== undefined) {
+      const shelterObj = this.objects.get(this.agent.shelteredByObjId);
+      if (!shelterObj || Math.hypot(shelterObj.pos.x - this.agent.pos.x, shelterObj.pos.y - this.agent.pos.y) > World.MAX_PICKUP_DISTANCE) {
+        this.agent.shelterFactor = undefined;
+        this.agent.shelteredByObjId = undefined;
+      }
+    }
+
+    return {
+      ambientTemperature,
+      biomassMultiplier,
+      hazardIntensityBoost: ep.hazardIntensityBoost,
+      hydrationDrain: ep.hydrationDrain,
+      scarcity,
+    };
+  }
+
+  /**
+   * Get the hazard exposure at the agent's current position,
+   * reduced by the current shelter factor.
+   */
+  agentHazardExposure(): number {
+    const raw = hazardExposure(this.agent.pos.x, this.agent.pos.y, this.hazardZones);
+    const shelter = this.agent.shelterFactor ?? 0;
+    return raw * (1 - shelter * 0.7);
+  }
+
+  /**
+   * Get hazard exposure breakdown by kind at the agent's position.
+   */
+  agentHazardBreakdown(): Record<'thermal' | 'toxic' | 'erosion', number> {
+    const raw = hazardExposureByKind(this.agent.pos.x, this.agent.pos.y, this.hazardZones);
+    const shelter = this.agent.shelterFactor ?? 0;
+    const reduce = 1 - shelter * 0.7;
+    return {
+      thermal: raw.thermal * reduce,
+      toxic: raw.toxic * reduce,
+      erosion: raw.erosion * reduce,
+    };
   }
 
   private chooseStationFunction(worldPos: { x: number; y: number }): StationFunction {

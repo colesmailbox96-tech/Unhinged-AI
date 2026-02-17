@@ -26,15 +26,26 @@ import { PROPERTY_KEYS } from '../sim/properties';
 
 type LiveVerb = 'MOVE_TO' | 'PICK_UP' | 'DROP' | 'BIND_TO' | 'STRIKE_WITH' | 'GRIND' | 'HEAT' | 'SOAK' | 'COOL' | 'ANCHOR' | 'CONTROL' | 'REST';
 export type LiveRegime = 'explore' | 'exploit' | 'manufacture';
+type LiveIntent = 'SEEK_WATER' | 'SEEK_FOOD' | 'HARVEST' | 'CRAFT' | 'BUILD' | 'MAINTAIN' | 'EXPLORE' | 'REST';
+type LiveRole = 'forager' | 'builder' | 'maintainer';
 
 interface CandidateAction {
   verb: LiveVerb;
   objId?: ObjID;
   targetId?: ObjID;
+  moveTarget?: { x: number; y: number };
   modelInput?: WorldModelInput;
   predicted?: WorldModelPrediction;
   score?: number;
   intensity?: number;
+}
+
+interface AgentTraits {
+  strength: number;
+  precision: number;
+  endurance: number;
+  curiosity: number;
+  builderBias: number;
 }
 
 interface ReplayTransition {
@@ -50,6 +61,7 @@ export interface LiveModeConfig {
   deterministic: boolean;
   rollingSeconds: number;
   livingMode?: boolean;
+  livingPreset?: 'default' | 'living-v1-ecology';
 }
 
 export interface LiveTrainingConfig {
@@ -68,6 +80,9 @@ export interface LiveAgentMemory {
   goodTools: number[];
   goodLocations: Array<{ x: number; y: number; score: number }>;
   needs: AgentNeeds;
+  traits: AgentTraits;
+  roleBias: LiveRole;
+  roleScores: Record<LiveRole, number>;
 }
 
 export interface LiveTickResult {
@@ -136,6 +151,9 @@ export interface LiveTickResult {
   populationMetrics: PopulationMetrics;
   agentIntent: string;
   agentIntentDrivers?: string[];
+  agentIntentScores?: Array<{ intent: string; score: number; breakdown: string[] }>;
+  agentRole?: LiveRole;
+  roleDistribution?: Record<LiveRole, number>;
   // Living Mode fields
   livingMode: boolean;
   agentNeeds?: AgentNeeds;
@@ -256,6 +274,22 @@ function variance(values: number[]): number {
   if (values.length < 2) return 0;
   const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
   return values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+}
+
+function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v));
+}
+
+function roleForIndex(index: number): LiveRole {
+  if (index % 3 === 0) return 'forager';
+  if (index % 3 === 1) return 'builder';
+  return 'maintainer';
+}
+
+function traitsForRole(role: LiveRole): AgentTraits {
+  if (role === 'forager') return { strength: 0.74, precision: 0.42, endurance: 0.69, curiosity: 0.58, builderBias: 0.24 };
+  if (role === 'builder') return { strength: 0.45, precision: 0.76, endurance: 0.48, curiosity: 0.44, builderBias: 0.82 };
+  return { strength: 0.4, precision: 0.63, endurance: 0.73, curiosity: 0.38, builderBias: 0.52 };
 }
 
 function chooseByPerception(world: World, perception: PerceptionHead, avoid: ObjID[] = []): WorldObject[] {
@@ -379,6 +413,7 @@ export class LiveModeEngine {
   lastControllerOutcomeDelta?: number;
   private _agentIntent = 'idle';
   private _agentIntentDrivers: string[] = [];
+  private _agentIntentScores: Array<{ intent: LiveIntent; score: number; breakdown: string[] }> = [];
   private readonly recentStrikeDamage: number[] = [];
   private readonly recentWoodRates: number[] = [];
   private readonly recentPredictionErrors: number[] = [];
@@ -393,6 +428,7 @@ export class LiveModeEngine {
   private readonly despawnByReasonCounts: Record<string, number> = {};
   private workset: WorksetState = createEmptyWorkset();
   private readonly config: LiveModeConfig;
+  private readonly ecologyEnabled: boolean;
   // Living Mode subsystems
   readonly skillTracker = new SkillTracker();
   readonly rewardBreakdown = new RewardBreakdown();
@@ -401,21 +437,28 @@ export class LiveModeEngine {
 
   constructor(config: LiveModeConfig) {
     this.config = config;
+    this.ecologyEnabled = config.livingPreset === 'living-v1-ecology';
     this.seed = config.seed;
     this.world = new World(config.seed);
     this.worldModel = new WorldModel();
     this.embedding = new ToolEmbedding();
     this.perception = new PerceptionHead(config.seed + 97);
-    this.memories = Array.from({ length: Math.max(1, config.populationSize) }, (_, idx) => ({
-      id: idx + 1,
-      energy: 1,
-      observations: [],
-      actions: [],
-      outcomes: [],
-      goodTools: [],
-      goodLocations: [],
-      needs: createDefaultNeeds(),
-    }));
+    this.memories = Array.from({ length: Math.max(1, config.populationSize) }, (_, idx) => {
+      const roleBias = roleForIndex(idx);
+      return {
+        id: idx + 1,
+        energy: 1,
+        observations: [],
+        actions: [],
+        outcomes: [],
+        goodTools: [],
+        goodLocations: [],
+        needs: createDefaultNeeds(),
+        traits: traitsForRole(roleBias),
+        roleBias,
+        roleScores: { forager: 0, builder: 0, maintainer: 0 },
+      };
+    });
     this.spawnedTargets = 1;
     this.spawnSuccess = 1;
     this.trainingScheduler.start();
@@ -510,50 +553,94 @@ export class LiveModeEngine {
     return this.tick % cycle < labTicks;
   }
 
-  private deriveIntent(verb: LiveVerb, memory: LiveAgentMemory): string {
-    if (this.stallDetector.isInForcedExplore(memory.id)) {
-      this._agentIntentDrivers = ['stall detected', 'forced explore'];
-      return 'explore';
-    }
-    if (this.config.livingMode) {
+  private dominantRole(memory: LiveAgentMemory): LiveRole {
+    const sorted = (Object.keys(memory.roleScores) as LiveRole[])
+      .map((role) => ({ role, score: memory.roleScores[role] }))
+      .sort((a, b) => b.score - a.score);
+    return sorted[0]?.role ?? memory.roleBias;
+  }
+
+  private deriveIntent(memory: LiveAgentMemory): LiveIntent {
+    if (!this.ecologyEnabled) {
       const urgent = mostUrgentNeed(memory.needs);
-      if (urgent.urgency > 0.15) {
-        if (urgent.need === 'hydration') {
-          this._agentIntentDrivers = [`hydration=${memory.needs.hydration.toFixed(2)}`, 'urgent'];
-          return 'hydrate';
-        }
-        if (urgent.need === 'energy') {
-          this._agentIntentDrivers = [`energy=${memory.needs.energy.toFixed(2)}`, 'urgent'];
-          return 'forage';
-        }
-        if (urgent.need === 'fatigue') {
-          this._agentIntentDrivers = [`fatigue=${memory.needs.fatigue.toFixed(2)}`, 'urgent'];
-          return 'rest';
-        }
+      if (urgent.need === 'hydration' && urgent.urgency > 0.1) {
+        this._agentIntentDrivers = [`hydration=${memory.needs.hydration.toFixed(2)}`];
+        return 'SEEK_WATER';
       }
+      if (urgent.need === 'energy' && urgent.urgency > 0.1) {
+        this._agentIntentDrivers = [`energy=${memory.needs.energy.toFixed(2)}`];
+        return 'SEEK_FOOD';
+      }
+      if (urgent.need === 'fatigue' && urgent.urgency > 0.1) {
+        this._agentIntentDrivers = [`fatigue=${memory.needs.fatigue.toFixed(2)}`];
+        return 'REST';
+      }
+      this._agentIntentDrivers = [this.regime === 'manufacture' ? 'manufacture' : 'explore'];
+      return this.regime === 'manufacture' ? 'CRAFT' : 'EXPLORE';
     }
-    if (verb === 'CONTROL' || verb === 'ANCHOR') {
-      this._agentIntentDrivers = ['crafting action', verb];
-      return 'build';
+    if (this.stallDetector.isInForcedExplore(memory.id)) {
+      this._agentIntentScores = [{ intent: 'EXPLORE', score: 1, breakdown: ['stall=1.00', 'forced explore'] }];
+      this._agentIntentDrivers = ['stall detected', 'forced explore'];
+      return 'EXPLORE';
     }
-    if (verb === 'STRIKE_WITH' || verb === 'GRIND') {
-      this._agentIntentDrivers = ['resource action', verb];
-      return 'forage';
-    }
-    if (verb === 'SOAK') {
-      this._agentIntentDrivers = ['hydration action', verb];
-      return 'hydrate';
-    }
-    if (verb === 'REST') {
-      this._agentIntentDrivers = ['resting', 'energy recovery'];
-      return 'rest';
-    }
-    if (verb === 'MOVE_TO') {
-      this._agentIntentDrivers = ['movement', 'exploring'];
-      return 'explore';
-    }
-    this._agentIntentDrivers = ['general', verb];
-    return 'explore';
+    const pos = this.world.agent.pos;
+    const hydrationNeed = Math.max(0, 0.62 - memory.needs.hydration) * 1.9;
+    const energyNeed = Math.max(0, 0.58 - memory.needs.energy) * 1.45;
+    const fatigueNeed = Math.max(0, memory.needs.fatigue - 0.64) * 1.5;
+    const waterTravel = this.world.nearestWaterDistance(pos.x, pos.y) / Math.max(1, this.world.width);
+    const bestBiomass = this.world.richestBiomassCellCenter();
+    const harvestTravel = Math.hypot(bestBiomass.x - pos.x, bestBiomass.y - pos.y) / Math.max(1, this.world.width);
+    const localBiomass = this.world.biomassAt(pos.x, pos.y);
+    const localMoisture = this.world.moistureAt(pos.x, pos.y);
+    const maintenancePressure = this.world.stationMaintenancePressure();
+    const lowStationCount = this.world.stations.size < 3 ? 0.16 : 0;
+    const buildCost = this.world.stations.size * 0.05 - this.world.structureSupportLogistics();
+    const holdBonus = this.world.agent.heldObjectId ? 0.09 : 0;
+    const scores: Array<{ intent: LiveIntent; score: number; breakdown: string[] }> = [
+      {
+        intent: 'SEEK_WATER',
+        score: hydrationNeed + localMoisture * 0.55 + memory.traits.endurance * 0.08 - waterTravel * 0.4,
+        breakdown: [`hydrationNeed=${hydrationNeed.toFixed(2)}`, `moisture=${localMoisture.toFixed(2)}`, `travel=-${(waterTravel * 0.4).toFixed(2)}`],
+      },
+      {
+        intent: 'SEEK_FOOD',
+        score: energyNeed + localBiomass * 0.45 + memory.traits.strength * 0.12 - harvestTravel * 0.35,
+        breakdown: [`energyNeed=${energyNeed.toFixed(2)}`, `biomass=${localBiomass.toFixed(2)}`, `travel=-${(harvestTravel * 0.35).toFixed(2)}`],
+      },
+      {
+        intent: 'HARVEST',
+        score: energyNeed * 0.8 + localBiomass * 0.6 + memory.traits.strength * 0.14 + holdBonus,
+        breakdown: [`energyNeed=${(energyNeed * 0.8).toFixed(2)}`, `yield=${(localBiomass * 0.6).toFixed(2)}`, `hold=${holdBonus.toFixed(2)}`],
+      },
+      {
+        intent: 'CRAFT',
+        score: memory.traits.precision * 0.35 + holdBonus + (this.regime === 'manufacture' ? 0.24 : 0.08),
+        breakdown: [`precision=${(memory.traits.precision * 0.35).toFixed(2)}`, `hold=${holdBonus.toFixed(2)}`, `regime=${this.regime}`],
+      },
+      {
+        intent: 'BUILD',
+        score: memory.traits.builderBias * 0.42 + lowStationCount + (this.regime !== 'explore' ? 0.11 : 0.02) - buildCost,
+        breakdown: [`builderBias=${(memory.traits.builderBias * 0.42).toFixed(2)}`, `stationNeed=${lowStationCount.toFixed(2)}`, `footprintCost=-${buildCost.toFixed(2)}`],
+      },
+      {
+        intent: 'MAINTAIN',
+        score: maintenancePressure * 0.9 + memory.traits.endurance * 0.12 + (this.world.stations.size > 0 ? 0.08 : 0),
+        breakdown: [`maintenance=${(maintenancePressure * 0.9).toFixed(2)}`, `endurance=${(memory.traits.endurance * 0.12).toFixed(2)}`, `stations=${this.world.stations.size}`],
+      },
+      {
+        intent: 'EXPLORE',
+        score: memory.traits.curiosity * 0.45 + (1 - localBiomass) * 0.2 + (1 - localMoisture) * 0.2,
+        breakdown: [`curiosity=${(memory.traits.curiosity * 0.45).toFixed(2)}`, `scarcity=${(((1 - localBiomass) + (1 - localMoisture)) * 0.2).toFixed(2)}`],
+      },
+      {
+        intent: 'REST',
+        score: fatigueNeed + Math.max(0, 0.42 - memory.needs.energy) * 0.8,
+        breakdown: [`fatigue=${fatigueNeed.toFixed(2)}`, `energyDeficit=${(Math.max(0, 0.42 - memory.needs.energy) * 0.8).toFixed(2)}`],
+      },
+    ];
+    this._agentIntentScores = scores.sort((a, b) => b.score - a.score);
+    this._agentIntentDrivers = this._agentIntentScores[0]?.breakdown ?? [];
+    return this._agentIntentScores[0]?.intent ?? 'EXPLORE';
   }
 
   private trackDespawn(reason: string, obj: WorldObject): void {
@@ -673,6 +760,9 @@ export class LiveModeEngine {
     const transformedObjectIds: number[] = [];
     if (chosen.verb === 'MOVE_TO') {
       const destination =
+        chosen.moveTarget
+          ? chosen.moveTarget
+          :
         chosen.objId && this.world.objects.has(chosen.objId)
           ? this.world.objects.get(chosen.objId)?.pos
           : this.workset.dropZone && this.regime === 'manufacture'
@@ -745,11 +835,18 @@ export class LiveModeEngine {
         };
       }
     }
+    if (chosen.verb === 'CONTROL') {
+      this.world.maintainNearestStation(this.world.agent.pos.x, this.world.agent.pos.y, 0.04);
+    }
     return { outcome: this.world.lastInteractionOutcome, transformedObjectIds };
   }
 
   private ensureEcologyPressure(): void {
     this.world.regrowBiomass(0.0035);
+    if (this.ecologyEnabled) {
+      this.world.regrowMoisture(0.004);
+      this.world.tickStructureDecay();
+    }
     if (this.world.objects.size < 18) this.world.spawnLooseObject();
     if (this.world.targetYieldStats().targetsAlive === 0) {
       this.world.spawnTarget();
@@ -808,22 +905,36 @@ export class LiveModeEngine {
         }
       }
     }
-    // Living Mode: override intent/action based on needs
-    if (this.config.livingMode && memory.energy >= 0.05) {
-      const urgent = mostUrgentNeed(memory.needs);
-      if (urgent.urgency > 0.2) {
-        const candidates = this.createCandidates(held);
-        if (urgent.need === 'hydration') {
-          const soakCandidate = candidates.find(c => c.verb === 'SOAK');
-          if (soakCandidate) chosen = soakCandidate;
-        } else if (urgent.need === 'fatigue') {
-          chosen = { verb: 'REST', score: 0 };
-        }
+    if (this.config.livingMode && this.ecologyEnabled && memory.energy >= 0.05) {
+      const intent = this.deriveIntent(memory);
+      this._agentIntent = intent;
+      const candidates = this.createCandidates(held);
+      const pick = (verbs: LiveVerb[]): CandidateAction | undefined => candidates.find((entry) => verbs.includes(entry.verb));
+      if (intent === 'SEEK_WATER') {
+        chosen = held ? pick(['SOAK', 'MOVE_TO']) ?? chosen : { verb: 'MOVE_TO', moveTarget: this.world.nearestWaterSource(this.world.agent.pos.x, this.world.agent.pos.y), score: 0.7 };
+      } else if (intent === 'SEEK_FOOD') {
+        chosen = held ? pick(['STRIKE_WITH', 'GRIND', 'MOVE_TO']) ?? chosen : pick(['PICK_UP', 'MOVE_TO']) ?? { verb: 'MOVE_TO', moveTarget: this.world.richestBiomassCellCenter(), score: 0.68 };
+      } else if (intent === 'HARVEST') {
+        chosen = pick(['STRIKE_WITH', 'GRIND', 'PICK_UP', 'MOVE_TO']) ?? chosen;
+      } else if (intent === 'BUILD') {
+        chosen = pick(['ANCHOR', 'BIND_TO', 'MOVE_TO']) ?? chosen;
+      } else if (intent === 'MAINTAIN') {
+        chosen = pick(['CONTROL', 'MOVE_TO', 'DROP']) ?? chosen;
+      } else if (intent === 'CRAFT') {
+        chosen = pick(['CONTROL', 'BIND_TO', 'GRIND']) ?? chosen;
+      } else if (intent === 'REST') {
+        chosen = { verb: 'REST', score: 0 };
+      } else {
+        chosen = pick(['MOVE_TO', 'PICK_UP', 'DROP']) ?? chosen;
       }
+    } else {
+      this._agentIntent = this.deriveIntent(memory);
     }
-    // Derive agent intent label
-    this._agentIntent = this.deriveIntent(chosen.verb, memory);
-    const cost = actionCost(chosen.verb);
+    const baseCost = actionCost(chosen.verb);
+    const buildLoadScale = chosen.verb === 'ANCHOR'
+      ? Math.max(1, 1 + this.world.stations.size * 0.1 - this.world.structureSupportLogistics())
+      : 1;
+    const cost = baseCost * buildLoadScale;
     if (chosen.verb !== 'REST' && memory.energy < cost) chosen = { verb: 'REST', score: 0 };
     const applyResult = chosen.verb === 'REST' ? { transformedObjectIds: [] } : this.applyCandidate(chosen);
     const outcome = applyResult.outcome;
@@ -841,6 +952,14 @@ export class LiveModeEngine {
     if (this.config.livingMode) {
       const needsResult = tickNeeds(memory.needs, chosen.verb);
       memory.needs = needsResult.needs;
+      if (chosen.verb === 'SOAK') {
+        const moistureBoost = this.world.moistureAt(this.world.agent.pos.x, this.world.agent.pos.y) * 0.04;
+        const purifierBoost = [...this.world.stations.values()].some((station) =>
+          station.functionType === 'purifier' && Math.hypot(station.worldPos.x - this.world.agent.pos.x, station.worldPos.y - this.world.agent.pos.y) <= 2.2)
+          ? 0.02
+          : 0;
+        memory.needs.hydration = clamp01(memory.needs.hydration + moistureBoost + purifierBoost);
+      }
       memory.energy = memory.needs.energy;
       this.world.agent.energy = memory.energy;
       // Track repeat penalties
@@ -960,19 +1079,28 @@ export class LiveModeEngine {
       }
       // Apply living mode reward adjustments
       const homeostasis = homeostasisReward(memory.needs);
-      effectiveness += homeostasis + skillReward - repeatPenalty;
+      const roleReward = {
+        forager: (chosen.verb === 'STRIKE_WITH' || chosen.verb === 'GRIND' ? 0.06 : 0) + Math.max(0, this.world.biomassAt(this.world.agent.pos.x, this.world.agent.pos.y) - 0.3) * 0.03,
+        builder: (chosen.verb === 'ANCHOR' || chosen.verb === 'BIND_TO' ? 0.06 : 0) + (chosen.verb === 'CONTROL' ? 0.03 : 0) + this.world.stations.size * 0.005,
+        maintainer: (chosen.verb === 'CONTROL' ? 0.07 : 0) + this.world.stationMaintenancePressure() * 0.03 + (this.world.targetYieldStats().targetsAlive > 0 ? 0.005 : 0),
+      };
+      const roleBiasScale = memory.roleBias === 'forager' ? roleReward.forager : memory.roleBias === 'builder' ? roleReward.builder : roleReward.maintainer;
+      memory.roleScores.forager += roleReward.forager;
+      memory.roleScores.builder += roleReward.builder;
+      memory.roleScores.maintainer += roleReward.maintainer;
+      effectiveness += homeostasis + skillReward - repeatPenalty + roleBiasScale;
       // Record reward breakdown
       this.rewardBreakdown.record(this.tick, {
         survival: homeostasis,
         foodIntake: chosen.verb === 'STRIKE_WITH' ? effectivenessBase * 0.3 : 0,
-        waterIntake: chosen.verb === 'SOAK' ? 0.08 : 0,
-        craftingOutcome: chosen.verb === 'BIND_TO' || chosen.verb === 'CONTROL' ? this.precisionScore * 0.1 : 0,
+        waterIntake: chosen.verb === 'SOAK' ? (0.04 + this.world.moistureAt(this.world.agent.pos.x, this.world.agent.pos.y) * 0.06) : 0,
+        craftingOutcome: chosen.verb === 'BIND_TO' || chosen.verb === 'CONTROL' || chosen.verb === 'ANCHOR' ? this.precisionScore * 0.1 : 0,
         novelty: predictionError > 0.08 ? 0.03 : 0,
         predictionError: predictionError * 0.1,
         empowerment: this.repeatabilityScore * 0.02,
         skillDiscovery: skillReward,
         spamPenalty: -this.measurementSpamPenalty,
-        repeatPenalty: -repeatPenalty,
+        repeatPenalty: -repeatPenalty - this.world.stationMaintenancePressure() * 0.01,
         idlePenalty: chosen.verb === 'REST' ? -0.01 : 0,
       });
     }
@@ -1036,6 +1164,13 @@ export class LiveModeEngine {
     const activeStation = stationEntries[0];
     const worksetFraction = worksetAtStationFraction(this.world, this.workset, DEFAULT_WORKSET_CONFIG.stationRadius);
     const avgDist = avgDistanceToStation(this.world, this.workset);
+    const roleDistribution = this.memories.reduce<Record<LiveRole, number>>(
+      (acc, entry) => {
+        acc[this.dominantRole(entry)] += 1;
+        return acc;
+      },
+      { forager: 0, builder: 0, maintainer: 0 },
+    );
     return {
       tick: this.tick,
       simTimeSeconds: this.simTimeSeconds,
@@ -1110,12 +1245,15 @@ export class LiveModeEngine {
       populationMetrics: this.populationCtrl.metrics(),
       agentIntent: this._agentIntent,
       agentIntentDrivers: [...this._agentIntentDrivers],
+      agentIntentScores: this._agentIntentScores.slice(0, 3).map((entry) => ({ intent: entry.intent, score: entry.score, breakdown: [...entry.breakdown] })),
+      agentRole: this.dominantRole(memory),
+      roleDistribution,
       // Living Mode fields
       livingMode: Boolean(this.config.livingMode),
       agentNeeds: this.config.livingMode ? { ...memory.needs } : undefined,
       rewardBreakdown: this.config.livingMode ? this.rewardBreakdown.latest() : undefined,
       skillMetrics: this.config.livingMode ? this.skillTracker.metrics() : undefined,
-      waterSources: this.config.livingMode ? 3 : 0,
+      waterSources: this.config.livingMode ? this.world.waterSources.length : 0,
       repeatPenalty: this._lastRepeatPenalty,
     };
   }
@@ -1217,6 +1355,9 @@ export class LiveModeEngine {
         goodTools: [...memory.goodTools],
         goodLocations: memory.goodLocations.map((entry) => ({ ...entry })),
         needs: { ...memory.needs },
+        traits: { ...memory.traits },
+        roleBias: memory.roleBias,
+        roleScores: { ...memory.roleScores },
       })),
       world: {
         woodGained: this.world.woodGained,

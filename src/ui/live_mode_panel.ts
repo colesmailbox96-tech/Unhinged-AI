@@ -14,6 +14,7 @@ export interface LiveModePanelConfig {
   rollingSeconds: number;
   showTrueLatentState: boolean;
   livingMode: boolean;
+  livingPreset: 'default' | 'living-v1-ecology';
 }
 
 export interface LiveModePanelHandlers {
@@ -57,9 +58,15 @@ export class LiveModePanel {
            <label><input data-live="deterministic" type="checkbox" /> Deterministic Live</label>
            <label><input data-live="showLatentDebug" type="checkbox" /> Show true latent state (debug)</label>
            <label><input data-live="pinWorkset" type="checkbox" /> Pin workset</label>
-           <label><input data-live="showWorkset" type="checkbox" checked /> Show workset</label>
-           <label><input data-live="livingMode" type="checkbox" checked /> Living Mode</label>
-         </div>
+            <label><input data-live="showWorkset" type="checkbox" checked /> Show workset</label>
+            <label><input data-live="livingMode" type="checkbox" checked /> Living Mode</label>
+            <label>Preset
+              <select data-live="preset">
+                <option value="default">Default</option>
+                <option value="living-v1-ecology" selected>Living v1 (Ecology)</option>
+              </select>
+            </label>
+          </div>
         <div style="margin-top:6px">
           <button data-live="start">Start Live</button>
           <button data-live="pause">Pause</button>
@@ -130,6 +137,9 @@ export class LiveModePanel {
       rollingSeconds: Math.max(5, Number((this.element.querySelector('[data-live="rollingSeconds"]') as HTMLInputElement).value) || 30),
       showTrueLatentState: (this.element.querySelector('[data-live="showLatentDebug"]') as HTMLInputElement).checked,
       livingMode: (this.element.querySelector('[data-live="livingMode"]') as HTMLInputElement).checked,
+      livingPreset: ((this.element.querySelector('[data-live="preset"]') as HTMLSelectElement).value === 'living-v1-ecology'
+        ? 'living-v1-ecology'
+        : 'default'),
     };
   }
 

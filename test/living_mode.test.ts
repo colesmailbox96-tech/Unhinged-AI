@@ -3,6 +3,7 @@ import { LiveModeEngine } from '../src/runner/live_mode';
 import { tickNeeds, createDefaultNeeds, homeostasisReward, mostUrgentNeed } from '../src/sim/needs';
 import { SkillTracker } from '../src/sim/skills';
 import { RewardBreakdown, RepeatTracker, diminishingReturnMultiplier } from '../src/sim/reward_breakdown';
+import { World } from '../src/sim/world';
 
 describe('Living Mode - Needs & Metabolism', () => {
   it('energy decreases over time with actions', () => {
@@ -290,5 +291,45 @@ describe('Living Mode - Property Axes', () => {
     expect(obj.props.porosity).toBeDefined();
     expect(obj.props.conductivity).toBeGreaterThanOrEqual(0);
     expect(obj.props.conductivity).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('Living v1 Ecology preset', () => {
+  it('creates localized moisture with bounded biomass carrying capacity', () => {
+    const world = new World(1337);
+    const source = world.waterSources[0];
+    const near = world.moistureAt(source.x, source.y);
+    const far = world.moistureAt(5, 5);
+    expect(near).toBeGreaterThan(far);
+    const capValues = world.biomassCapacity.flat();
+    expect(Math.max(...capValues)).toBeGreaterThan(Math.min(...capValues));
+  });
+
+  it('intent uses scored breakdown when ecology preset is enabled', () => {
+    const engine = new LiveModeEngine({
+      seed: 1337,
+      populationSize: 1,
+      ticksPerSecond: 20,
+      deterministic: true,
+      rollingSeconds: 30,
+      livingMode: true,
+      livingPreset: 'living-v1-ecology',
+    });
+    const result = engine.tickOnce();
+    expect(result.agentIntentScores?.length ?? 0).toBeGreaterThan(0);
+    const top = result.agentIntentScores?.[0];
+    expect(top?.intent).toBe(result.agentIntent);
+    expect(top?.breakdown.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it('anchored structures are assigned an explicit function', () => {
+    const world = new World(11);
+    const anchorable = [...world.objects.values()][0];
+    world.apply({ type: 'MOVE_TO', x: anchorable.pos.x, y: anchorable.pos.y });
+    world.apply({ type: 'PICK_UP', objId: anchorable.id });
+    world.apply({ type: 'ANCHOR', worldPos: { x: 7.8, y: 8 } });
+    const station = [...world.stations.values()][0];
+    expect(station).toBeDefined();
+    expect(['storage', 'workshop', 'purifier', 'beacon']).toContain(station.functionType);
   });
 });
